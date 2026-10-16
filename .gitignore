@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+build/
+*.tsbuildinfo
+
+# runtime data — NEVER commit (DB, archives, vault, keys, vendor binaries)
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.key
+*.pem
+
+# env
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+logs/
+
+# os/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# vendor (downloaded at runtime, never in git)
+vendor/
