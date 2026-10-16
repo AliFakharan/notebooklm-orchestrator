@@ -58,20 +58,6 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
   mkdirSync(paths.sessionsDir, { recursive: true, mode: 0o700 });
   mkdirSync(paths.vendorDir, { recursive: true });
 
-  // Provider selection is EXPLICIT and observable: config.provider decides.
-  // There is no silent fallback: "python-worker" must actually start.
-  const provider: NotebookLMProvider =
-    config.provider === "python-worker"
-      ? new PythonWorkerProvider({
-          sessionDir: paths.sessionsDir,
-          dataDir: config.dataDir,
-          pythonBin: config.pythonBin,
-          jobTimeoutMs: config.jobTimeoutMs,
-          allowDirect: config.allowDirectEgress,
-          log: (msg) => console.log(`[nlo:worker] ${msg}`),
-        })
-      : new MockProvider();
-
   // Proxy runtime: mock by default; xray when the binary is present/approved.
   // The stub remains as a safe last resort (reports not_configured, fails
   // closed) — it is never a "working" runtime.
@@ -103,11 +89,44 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
         return { ok: false, latencyMs: 0, error: "no tunnel available (fail-closed)" };
       }
       const r = await fetchThroughTunnel(via, dest);
-      return { ok: r.ok, body: r.body, latencyMs: r.latencyMs, error: r.error };
+      return {
+        ok: r.ok,
+        status: r.status,
+        body: r.body,
+        latencyMs: r.latencyMs,
+        error: r.error,
+      };
     },
     vault,
     { log: (msg) => console.log(`[nlo:proxy] ${msg}`) },
   );
+
+  // Provider selection is EXPLICIT and observable: config.provider decides.
+  // There is no silent fallback: "python-worker" must actually start.
+  // The worker gets the proxy manager so auth ops (login/verify) route
+  // through the same verified tunnels as jobs (fail-closed).
+  const provider: NotebookLMProvider =
+    config.provider === "python-worker"
+      ? new PythonWorkerProvider({
+          sessionDir: paths.sessionsDir,
+          dataDir: config.dataDir,
+          pythonBin: config.pythonBin,
+          loginBrowser: config.loginBrowser,
+          jobTimeoutMs: config.jobTimeoutMs,
+          allowDirect: config.allowDirectEgress,
+          proxyManager,
+          proxiesRepo: {
+            countEnabled: () => proxies.list().filter((n) => n.enabled).length,
+            listEnabled: () =>
+              proxies
+                .list()
+                .filter((n) => n.enabled)
+                .map((n) => ({ id: n.id })),
+            health: (nodeId) => proxies.health(nodeId),
+          },
+          log: (msg) => console.log(`[nlo:worker] ${msg}`),
+        })
+      : new MockProvider();
 
   const runner = new JobRunner({
     jobs,

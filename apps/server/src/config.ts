@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,12 @@ export interface AppConfig {
   healthAllowlist: string[];
   /** Python interpreter for the notebooklm worker (default "python3"). */
   pythonBin: string;
+  /**
+   * Browser channel for interactive login: "chromium" (bundled Playwright
+   * build) or "chrome"/"msedge" (system-installed browser, used when the
+   * bundled download is unavailable). Default "chromium".
+   */
+  loginBrowser: string;
   /** Hard timeout for a live job (ms). */
   jobTimeoutMs: number;
   /** Development only: allow live jobs without a proxy tunnel. */
@@ -39,6 +45,35 @@ function boolEnv(name: string, def: boolean): boolean {
   if (["1", "true", "yes", "on"].includes(raw.toLowerCase())) return true;
   if (["0", "false", "no", "off"].includes(raw.toLowerCase())) return false;
   throw new Error(`env ${name} must be a boolean`);
+}
+
+/**
+ * Minimal .env loader (no dependency): reads <repo>/.env if present and sets
+ * variables that are not already set in the environment (real env always
+ * wins). Called explicitly by the server entrypoint and the live scripts;
+ * tests never call it, so test isolation is unaffected.
+ */
+export function loadDotEnv(): void {
+  const p = path.join(REPO_ROOT, ".env");
+  if (!existsSync(p)) return;
+  let text: string;
+  try {
+    text = readFileSync(p, "utf8");
+  } catch {
+    return;
+  }
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const i = t.indexOf("=");
+    if (i <= 0) continue;
+    const k = t.slice(0, i).trim();
+    let v = t.slice(i + 1).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    if (process.env[k] === undefined) process.env[k] = v;
+  }
 }
 
 /**
@@ -101,6 +136,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     liveTestsEnabled: boolEnv("NLO_LIVE_TESTS", false),
     healthAllowlist,
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
+    loginBrowser: env("NLO_LOGIN_BROWSER") ?? "chromium",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),
   };

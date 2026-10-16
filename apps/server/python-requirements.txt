@@ -2,11 +2,16 @@
 #
 # Install (one-time, into data/venv — created by: npm run worker:setup --workspace @nlo/server):
 #   python3 -m venv data/venv
-#   data/venv/bin/pip install -r apps/server/python-requirements.txt
+#   data/venv/bin/pip install -U pip -r apps/server/python-requirements.txt
 #   data/venv/bin/playwright install chromium
 #
 # Then point the server at the interpreter:
 #   NLO_PYTHON_BIN=$PWD/data/venv/bin/python
-
-notebooklm>=0.4.0
-playwright>=1.44.0
+#
+# NOTE: the PyPI package is "notebooklm-py" (NOT "notebooklm", which is an
+# unrelated abandoned package). The [browser] extra pulls playwright, which
+# the interactive login op requires. Pinned to the 0.8.x line whose public
+# API (from_storage / get_account_email / notebooks.list / sources.add_file /
+# wait_until_ready / chat.ask) was source-verified against research/notebooklm-py
+# at v0.8.5.
+notebooklm-py[browser]>=0.8.5,<0.9

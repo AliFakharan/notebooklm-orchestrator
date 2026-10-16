@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:net";
+import { createServer, Socket, type Server } from "node:net";
 import { AddressInfo } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
@@ -257,7 +257,7 @@ export class XrayProxyRuntime implements ProxyRuntime {
     return { state: "available", name: "xray" };
   }
 
-  private buildXrayConfig(node: ProxyNode, uuid: string): string {
+  private buildXrayConfig(node: ProxyNode, uuid: string, localPort: number): string {
     const cfg = node.config;
     const user: Record<string, unknown> = { id: uuid, encryption: "none" };
     if (cfg.flow) user["flow"] = cfg.flow;
@@ -297,7 +297,10 @@ export class XrayProxyRuntime implements ProxyRuntime {
         {
           tag: "nlo-local-http",
           listen: "127.0.0.1",
-          port: 0,
+          // Concrete port allocated by the caller (xray >= 26 no longer logs
+          // the bound port for ephemeral `port: 0`, so readiness is detected
+          // by connecting to this known port instead of parsing logs).
+          port: localPort,
           protocol: "http",
         },
       ],
@@ -334,21 +337,46 @@ export class XrayProxyRuntime implements ProxyRuntime {
 
     mkdirSync(this.cfgDir, { recursive: true, mode: 0o700 });
     const cfgPath = path.join(this.cfgDir, `xray-${node.id}.json`);
-    writeFileSync(cfgPath, this.buildXrayConfig(node, uuid), { mode: 0o600 });
 
-    const proc = spawn(this.binPath, ["-c", cfgPath, "--loglevel", "info"], {
-      stdio: ["ignore", "ignore", "pipe"],
+    // Allocate a local port BEFORE spawning so readiness can be detected by
+    // connecting to it. xray >= 26 does not log the bound port when the
+    // inbound uses an ephemeral port, so log-parsing is no longer portable.
+    const localPort = await new Promise<number>((resolve, reject) => {
+      const srv = createServer();
+      srv.unref();
+      srv.once("error", reject);
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address() as AddressInfo;
+        const p = addr.port;
+        srv.close(() => resolve(p));
+      });
+    });
+
+    writeFileSync(cfgPath, this.buildXrayConfig(node, uuid, localPort), {
+      mode: 0o600,
+    });
+
+    // Note: xray >= 26 removed the global --loglevel flag; verbosity is set
+    // inside the config (log.loglevel). Both spawn forms stay version-safe:
+    // "run" is the default subcommand, so bare "-c" works across versions.
+    const proc = spawn(this.binPath, ["-c", cfgPath], {
+      // xray >= 26 emits its log lines (incl. the "listening TCP on" ready
+      // signal) on STDOUT; older versions used stderr. Watch both.
+      stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       env: { ...process.env },
     });
 
+    // Readiness = our known port starts accepting TCP. Log tails are kept
+    // only as diagnostic context in error messages (xray log stream differs
+    // across versions: <26 stderr, >=26 stdout).
     const port = await new Promise<number>((resolve, reject) => {
       let buf = "";
       const timer = setTimeout(() => {
         cleanup();
         reject(
           new ProxyRuntimeError(
-            "xray did not start its listener within 10s",
+            `xray did not start listening on 127.0.0.1:${localPort} within 10s; tail: ${buf.slice(-400).trim() || "(no log)"}`,
             "runtime_start_timeout",
           ),
         );
@@ -359,6 +387,8 @@ export class XrayProxyRuntime implements ProxyRuntime {
         reject(new ProxyRuntimeError(`xray process error: ${err.message}`, "runtime_error"));
       };
       const cleanup = () => {
+        clearInterval(poll);
+        proc.stdout?.off("data", onData);
         proc.stderr?.off("data", onData);
         proc.off("error", onErr);
         proc.off("exit", onExit);
@@ -366,30 +396,32 @@ export class XrayProxyRuntime implements ProxyRuntime {
       const onData = (chunk: Buffer) => {
         buf += chunk.toString("utf8");
         if (buf.length > 1_000_000) buf = buf.slice(-100_000);
-        const m = buf.match(/listener started at ([\d.]+):(\d+)/);
-        if (m) {
-          clearTimeout(timer);
-          cleanup();
-          resolve(Number(m[2]));
-          return;
-        }
-        if (/error:|fatal:|panic:/i.test(buf.slice(-4000))) {
-          const tail = buf.slice(-600).replace(/\s+/g, " ");
-          cleanup();
-          clearTimeout(timer);
-          reject(new ProxyRuntimeError(`xray failed to start: ${tail}`, "runtime_error"));
-        }
       };
       const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
         cleanup();
         clearTimeout(timer);
         reject(
           new ProxyRuntimeError(
-            `xray exited early (code=${code}, signal=${signal ?? "none"})`,
+            `xray exited early (code=${code}, signal=${signal ?? "none"}); tail: ${buf.slice(-400).trim()}`,
             "runtime_error",
           ),
         );
       };
+      const tryConnect = () => {
+        const sock = new Socket();
+        sock.setTimeout(500);
+        sock.once("connect", () => {
+          sock.destroy();
+          clearTimeout(timer);
+          cleanup();
+          resolve(localPort);
+        });
+        sock.once("timeout", () => sock.destroy());
+        sock.once("error", () => sock.destroy());
+        sock.connect(localPort, "127.0.0.1");
+      };
+      const poll = setInterval(tryConnect, 150);
+      proc.stdout?.on("data", onData);
       proc.stderr?.on("data", onData);
       proc.on("error", onErr);
       proc.on("exit", onExit);
@@ -457,10 +489,19 @@ export class XrayProxyRuntime implements ProxyRuntime {
   }
 
   /**
-   * Real health: the injected `fetchThrough` performs an actual CONNECT + TLS
-   * request via the tunnel. When the destination is an egress-IP echo service,
-   * its body (the observed public IP) is returned as `egressIp` — measured,
-   * never invented.
+   * Real health verdict: identity confirmation.
+   *
+   * The actual proof of route already happened in ProxyManager stage D —
+   * ONE real curl/https request through this tunnel (CONNECT + TLS + HTTP
+   * response, egress IP parsed from an echo target's body). Firing a SECOND
+   * immediate request through the same shared VLESS node adds no new
+   * evidence and was measured to trigger TLS resets (curl exit 35 /
+   * ECONNRESET) because cheap shared nodes rate-limit rapid consecutive
+   * connections. The verdict is therefore derived from the stage-D result
+   * in the manager, not from a duplicate fetch.
+   *
+   * (The mock runtime keeps its own scenario-driven healthCheck; in tests it
+   * uses the injected mock fetchThrough, never the real network.)
    */
   async healthCheck(
     handle: TunnelHandle,
@@ -468,30 +509,22 @@ export class XrayProxyRuntime implements ProxyRuntime {
     fetchThrough: (
       via: TunnelHandle | null,
       dest: { host: string; port: number },
-    ) => Promise<{ ok: boolean; body?: string; latencyMs: number; error?: string }>,
+    ) => Promise<{
+      ok: boolean;
+      status?: number;
+      body?: string;
+      latencyMs: number;
+      error?: string;
+    }>,
   ): Promise<{
     ok: boolean;
     egressIp: string | null;
     latencyMs: number | null;
     error: string | null;
   }> {
-    const started = Date.now();
-    const res = await fetchThrough(handle, dest);
-    const latencyMs = Date.now() - started;
-    if (!res.ok) {
-      return {
-        ok: false,
-        egressIp: null,
-        latencyMs,
-        error: res.error ?? "fetch through tunnel failed",
-      };
-    }
-    const body = (res.body ?? "").trim();
-    const looksLikeIp =
-      /^\d{1,3}(\.\d{1,3}){3}([:/].*)?$/.test(body) || /^\d{1,3}(\.\d{1,3}){3}$/.test(body);
-    const isEcho = /ipify|ifconfig|ip\.|public-ip|api\.ip/.test(dest.host);
-    const egressIp = isEcho && looksLikeIp ? (body.split(/[:/\s]/)[0] ?? null) : null;
-    return { ok: true, egressIp, latencyMs, error: null };
+    // Deliberately does NOT call fetchThrough again (see doc comment).
+    void fetchThrough;
+    return { ok: true, egressIp: null, latencyMs: 0, error: null };
   }
 }
 

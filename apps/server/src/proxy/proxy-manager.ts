@@ -65,7 +65,13 @@ export class ProxyManager {
     private readonly fetchThrough: (
       via: TunnelHandle | null,
       dest: { host: string; port: number },
-    ) => Promise<{ ok: boolean; body?: string; latencyMs: number; error?: string }>,
+    ) => Promise<{
+      ok: boolean;
+      status?: number;
+      body?: string;
+      latencyMs: number;
+      error?: string;
+    }>,
     private readonly vault: SecretVault,
     opts: { healthTtlMs?: number; log?: (line: string) => void } = {},
   ) {
@@ -240,16 +246,29 @@ export class ProxyManager {
       const d = Date.now();
       const res = await this.fetchThrough(handle, dest).catch((e) => ({
         ok: false as const,
+        status: undefined as number | undefined,
+        body: undefined as string | undefined,
         latencyMs: Date.now() - d,
         error: e instanceof Error ? e.message : String(e),
       }));
       const latencyMs = res.latencyMs ?? Date.now() - d;
-      if (!res.ok) {
+      const isEcho =
+        /^\d{1,3}(\.\d{1,3}){3}$/.test(dest.host) ||
+        /ipify|ifconfig|ip\.|public-ip|api\.ip/.test(dest.host);
+      // Route proof differs by target:
+      //  - IP-echo: must be 2xx AND a parseable IP in the body (egress proof).
+      //  - notebooklm (any non-echo host): ANY HTTP response through the
+      //    tunnel proves the route (CONNECT + TLS + HTTP round-trip). A 403
+      //    "bot check" from Google IS a working route — the service answered
+      //    us from the node's egress. Only a connection-level failure means
+      //    the route is broken.
+      const routeWorks = isEcho ? res.ok : res.status !== undefined;
+      if (!routeWorks) {
         const res2: HealthCheckResult = {
           ok: false,
           egressIp: null,
           latencyMs,
-          error: res.error ?? "fetch through tunnel failed",
+          error: res.error ?? "fetch through tunnel failed (no HTTP response via tunnel)",
           category: /^\d{1,3}(\.\d{1,3}){3}$/.test(dest.host) ? "tls" : "upstream",
           target: targetStr,
           evidence: `HTTPS via tunnel ${handle.host}:${handle.port} -> ${targetStr} failed`,
@@ -264,7 +283,9 @@ export class ProxyManager {
       // E. Runtime-level verdict (e.g. expected-egress-IP enforcement by the
       //    mock; for xray this is the same real check re-confirmed).
       const verdict = await this.runtime.healthCheck(handle, dest, this.fetchThrough);
-      const finalOk = res.ok && verdict.ok;
+      // For non-echo targets the ROUTE is the verdict (any HTTP response);
+      // for echo targets a 2xx with an IP is still required.
+      const finalOk = (isEcho ? res.ok : routeWorks) && verdict.ok;
       const res3: HealthCheckResult = {
         ok: finalOk,
         egressIp: verdict.egressIp ?? egressIp,

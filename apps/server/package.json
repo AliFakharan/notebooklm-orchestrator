@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "verify:live": "tsx scripts/verify-live.ts",
-    "worker:setup": "python3 -m venv ../../data/venv && ../../data/venv/bin/pip install -U pip -r python-requirements.txt && ../../data/venv/bin/playwright install chromium"
+    "e2e:live": "tsx scripts/e2e-live.ts",
+    "worker:setup": "python3 -m venv ../../data/venv && ../../data/venv/bin/pip install -U pip -r python-requirements.txt && (../../data/venv/bin/playwright install chromium || echo 'WARN: bundled chromium download failed; if a system Chrome exists, set NLO_LOGIN_BROWSER=chrome in .env (see output)')"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",

@@ -30,6 +30,13 @@ import { isAmbiguousCode } from "./protocol.js";
  *    importing an existing storage_state.json. It is NEVER served over HTTP.
  *  - credentialRef format: "session:<accountId>".
  */
+/** Minimal structural view of a proxy selection (avoids a hard dependency
+ *  on the proxy layer; ProxyManager.select satisfies this). */
+interface AuthTunnelSelection {
+  node: { id: string; config: { name: string } };
+  handle: { host: string; port: number };
+}
+
 export class PythonWorkerProvider implements NotebookLMProvider {
   readonly name = "python-worker";
 
@@ -39,10 +46,29 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       dataDir: string;
       pythonBin?: string;
       workerPath?: string;
+      /** Browser channel for interactive login (chromium | chrome | msedge). */
+      loginBrowser?: string;
       /** Per-job hard timeout (default 30 min). */
       jobTimeoutMs?: number;
-      /** True to allow running WITHOUT a tunnel (development only). */
+      /**
+       * True to allow auth ops (login/verify) WITHOUT a tunnel when NO proxy
+       * node is configured at all. Jobs are ALWAYS fail-closed regardless.
+       */
       allowDirect?: boolean;
+      /** Selects/starts a tunnel for auth ops (login/verify) — fail-closed. */
+      proxyManager?: {
+        select: (preferredNodeId: string | null) => Promise<AuthTunnelSelection>;
+        runHealthCheck: (
+          nodeId: string,
+          dest: { host: string; port: number },
+        ) => Promise<{ ok: boolean; error: string | null }>;
+      };
+      /** Configured nodes (direct auth only when none exist). */
+      proxiesRepo?: {
+        countEnabled: () => number;
+        listEnabled: () => { id: string }[];
+        health: (nodeId: string) => { lastCheckedAt: string | null } | null;
+      };
       log?: (line: string) => void;
     },
   ) {
@@ -96,6 +122,79 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       default:
         return "unknown";
     }
+  }
+
+  /**
+   * Auth ops (login/verify) must reach the real service. When any proxy node
+   * is configured, a tunnel is REQUIRED (same fail-closed policy as jobs):
+   * select() validates config + fresh health and starts the tunnel. Only when
+   * NO node exists at all does direct egress proceed (an explicit, logged
+   * configuration choice).
+   */
+  private async acquireAuthTunnel(): Promise<{
+    nodeId: string;
+    handle: { host: string; port: number } | null;
+    browserProxy: { server: string } | null;
+  }> {
+    const pm = this.opts.proxyManager;
+    const repo = this.opts.proxiesRepo;
+    const enabled = repo?.listEnabled() ?? [];
+    if (!pm || enabled.length === 0) {
+      if (!this.opts.allowDirect) {
+        throw new ProviderFailure({
+          failureClass: "proxy",
+          message:
+            "no proxy route available for auth (fail-closed): configure a proxy node or set NLO_ALLOW_DIRECT_EGRESS=1",
+          ambiguous: false,
+          needsReauth: false,
+        });
+      }
+      this.log(
+        "auth op proceeding with DIRECT egress (no proxy node configured; NLO_ALLOW_DIRECT_EGRESS=1)",
+      );
+      return { nodeId: "", handle: null, browserProxy: null };
+    }
+    const HEALTH_TTL_MS = 10 * 60_000;
+    const isFresh = (id: string): boolean => {
+      const h = repo?.health(id);
+      return !!h?.lastCheckedAt && Date.now() - Date.parse(h.lastCheckedAt) < HEALTH_TTL_MS;
+    };
+    let sel: AuthTunnelSelection;
+    try {
+      sel = await pm.select(null);
+    } catch (err) {
+      // select() demands a FRESH healthy check. If fresh checks exist and it
+      // still failed, rethrow. If nothing fresh exists, self-heal: run the
+      // staged check against the real target (SSRF-guarded, allowlisted) and
+      // retry selection — the server keeps the user from doing anything.
+      if (enabled.some((n) => isFresh(n.id))) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      this.log("no fresh proxy health — running staged check against the real target before auth");
+      const firstNode = enabled[0]!; // non-empty: guarded above
+      const hc = await pm.runHealthCheck(firstNode.id, {
+        host: "notebooklm.google.com",
+        port: 443,
+      });
+      if (!hc.ok) {
+        throw new ProviderFailure({
+          failureClass: "proxy",
+          message: `proxy route unhealthy (fail-closed): ${hc.error ?? "health check failed"}`,
+          ambiguous: false,
+          needsReauth: false,
+        });
+      }
+      sel = await pm.select(null);
+    }
+    this.log(
+      `auth op routed through node ${sel.node.config.name} (tunnel ${sel.handle.host}:${sel.handle.port})`,
+    );
+    const server = `http://${sel.handle.host}:${sel.handle.port}`;
+    return {
+      nodeId: sel.node.id,
+      handle: { host: sel.handle.host, port: sel.handle.port },
+      browserProxy: { server },
+    };
   }
 
   /** Env for a job's worker so notebooklm-py routes through the tunnel. */
@@ -166,9 +265,13 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         detail: "no session stored for this account (login required)",
       };
     }
+    // Verification talks to the REAL service: route through a verified tunnel
+    // (fail-closed when nodes exist). The tunnel is kept alive while used.
+    const tunnel = await this.acquireAuthTunnel();
     const w = new WorkerSupervisor({
       pythonBin: this.opts.pythonBin,
       workerPath: this.opts.workerPath,
+      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
       requestTimeoutMs: 90_000,
       log: this.log,
     });
@@ -205,15 +308,21 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
   }
 
-  /** Interactive login: opens a browser; the user signs in; session saved 0600. */
+  /** Interactive login: opens a browser; the user signs in; session saved 0600.
+   *
+   * The browser itself is routed through the verified tunnel (Playwright
+   * `proxy` launch option) — Chromium ignores HTTP(S)_PROXY env vars — and
+   * the post-login verification call uses the same tunnel. */
   async login(
     accountId: string,
-    opts: { timeoutSec?: number; headless?: boolean } = {},
+    opts: { timeoutSec?: number; headless?: boolean; browser?: string } = {},
   ): Promise<{ email: string | null }> {
     const sessionPath = this.sessionPathFor(accountId);
+    const tunnel = await this.acquireAuthTunnel();
     const w = new WorkerSupervisor({
       pythonBin: this.opts.pythonBin,
       workerPath: this.opts.workerPath,
+      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
       requestTimeoutMs: (opts.timeoutSec ?? 600) * 1000 + 120_000,
       log: this.log,
     });
@@ -223,7 +332,8 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         sessionPath,
         timeoutSec: opts.timeoutSec ?? 600,
         headless: opts.headless ?? false,
-        browser: "chromium",
+        browser: opts.browser ?? this.opts.loginBrowser ?? "chromium",
+        proxy: tunnel.browserProxy,
       });
       try {
         chmodSync(sessionPath, 0o600);

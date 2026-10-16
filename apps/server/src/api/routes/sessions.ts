@@ -102,6 +102,8 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
   const loginBody = z.object({
     timeoutSec: z.number().int().min(60).max(1800).optional(),
     headless: z.boolean().optional(),
+    /** Browser channel override: "chromium" (bundled) or "chrome"/"msedge". */
+    browser: z.enum(["chromium", "chrome", "msedge"]).optional(),
   });
 
   app.post<{ Params: { id: string } }>("/api/sessions/:id/login", async (req) => {
@@ -126,6 +128,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       const r = await w.login(acct.id, {
         timeoutSec: body.timeoutSec ?? 600,
         headless: body.headless ?? false,
+        browser: body.browser,
       });
       const s = ctx.sessions.transition(acct.id, PROVIDER, "AUTHENTICATED", {
         email: r.email,

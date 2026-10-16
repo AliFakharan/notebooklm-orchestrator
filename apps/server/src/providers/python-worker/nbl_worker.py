@@ -185,6 +185,10 @@ async def op_login(p: dict[str, Any]) -> dict[str, Any]:
     headless = bool(p.get("headless", False))
     browser = p.get("browser", "chromium")
     timeout = int(p.get("timeoutSec", 600))
+    # Browser-level proxy (Playwright launch option). Chromium does NOT honor
+    # HTTPS_PROXY/HTTP_PROXY env vars for its own traffic, so when a tunnel is
+    # required the supervisor passes {"server": "http://127.0.0.1:PORT", ...}.
+    proxy = p.get("proxy") or None
 
     from playwright.async_api import async_playwright
 
@@ -195,6 +199,8 @@ async def op_login(p: dict[str, Any]) -> dict[str, Any]:
         launch_kwargs: dict[str, Any] = {"headless": headless}
         if browser != "chromium":
             launch_kwargs["channel"] = browser
+        if proxy:
+            launch_kwargs["proxy"] = proxy
         await _progress("launching_browser")
         browser_obj = await pw.chromium.launch(**launch_kwargs)
         try:

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { redactSecrets } from "@nlo/shared";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadDotEnv } from "./config.js";
 import { createAppContext } from "./app-context.js";
 import { buildApp } from "./api/server.js";
 
@@ -14,6 +14,7 @@ import { buildApp } from "./api/server.js";
  * - Graceful shutdown: stop the queue (drain in-flight job), close app+db.
  */
 async function main(): Promise<void> {
+  loadDotEnv();
   const config = loadConfig();
   const ctx = createAppContext(config);
 

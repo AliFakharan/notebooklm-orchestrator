@@ -22,7 +22,7 @@
  *   - refuses to run when NLO_PROVIDER != python-worker
  */
 import { existsSync } from "node:fs";
-import { loadConfig, dataPaths } from "../src/config.js";
+import { loadConfig, loadDotEnv, dataPaths } from "../src/config.js";
 import { Db } from "../src/db/db.js";
 import { PythonWorkerProvider } from "../src/providers/python-worker/python-worker-provider.js";
 import { WorkerSupervisor } from "../src/providers/python-worker/worker.js";
@@ -51,6 +51,7 @@ function info(msg: string) {
 }
 
 async function main() {
+  loadDotEnv();
   const config = loadConfig();
   const paths = dataPaths(config.dataDir);
   if (config.provider !== "python-worker") {
