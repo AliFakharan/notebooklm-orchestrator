@@ -15,6 +15,9 @@ npm install
 npm run dev          # server روی 127.0.0.1:4870 + web روی 127.0.0.1:5173 (proxy /api به server)
 ```
 
+بعد از `npm run build`، server همان `apps/web/dist` را با SPA fallback روی 127.0.0.1:4870 سرو می‌کند
+(یک پورت برای همه: API + وب). مسیرهای /api در 404، envelope JSON نگه می‌مانند.
+
 ## دستورات
 
 ```bash
