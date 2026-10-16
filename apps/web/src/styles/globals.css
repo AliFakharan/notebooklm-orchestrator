@@ -1,0 +1,187 @@
+@import "tailwindcss";
+@import "@fontsource/vazirmatn/400.css";
+@import "@fontsource/vazirmatn/500.css";
+@import "@fontsource/vazirmatn/700.css";
+
+/* گرافیت (graphite) — VibeFarsi theme, dark and technical-minimal. */
+:root {
+  color-scheme: dark;
+
+  /* رنگ */
+  --background: oklch(0.115 0.002 285);
+  --foreground: oklch(0.975 0 0);
+  --card: oklch(0.14 0.002 285);
+  --card-foreground: oklch(0.975 0 0);
+  --popover: oklch(0.16 0.002 285);
+  --popover-foreground: oklch(0.975 0 0);
+  --primary: oklch(0.975 0 0);
+  --primary-foreground: oklch(0.13 0 0);
+  --secondary: oklch(0.2 0.002 285);
+  --secondary-foreground: oklch(0.975 0 0);
+  --muted: oklch(0.175 0.002 285);
+  --muted-foreground: oklch(0.63 0.004 285);
+  --accent: oklch(0.2 0.002 285);
+  --accent-foreground: oklch(0.975 0 0);
+  --destructive: oklch(0.65 0.2 25);
+  --success: oklch(0.75 0.16 160);
+  --warning: oklch(0.82 0.16 80);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 11%);
+  --ring: oklch(0.7 0 0);
+  --brand: oklch(0.8 0.165 65);
+  --brand-foreground: oklch(0.22 0.06 60);
+
+  /* زبان طراحی */
+  --radius: 0.625rem;
+  --type-display-weight: 700;
+  --shape-control: calc(var(--radius) - 2px);
+  --shape-field: calc(var(--radius) - 2px);
+  --shape-surface: calc(var(--radius) + 12px);
+  --shape-overlay: calc(var(--radius) + 4px);
+  --line: 1px;
+  --line-field: 1px;
+  --line-style: solid;
+  --field: color-mix(in oklch, var(--background) 60%, transparent);
+  --depth-control: 0 0 #0000;
+  --depth-press: 0 0 #0000;
+  --depth-field: 0 0 #0000;
+  --depth-surface: 0 1px 0 0 oklch(1 0 0 / 6%) inset;
+  --depth-overlay: 0 20px 50px -20px oklch(0 0 0 / 80%);
+  --surface-filter: none;
+  --press: scale(0.98);
+  --motion: 200ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
+  --backdrop: none;
+  --spacing: 0.25rem;
+}
+
+@theme inline {
+  --font-sans: "Vazirmatn", "IRANSans", system-ui, sans-serif;
+  --font-display: var(--font-sans);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-field: var(--field);
+
+  --radius-control: var(--shape-control);
+  --radius-field: var(--shape-field);
+  --radius-surface: var(--shape-surface);
+  --radius-overlay: var(--shape-overlay);
+
+  --shadow-control: var(--depth-control);
+  --shadow-press: var(--depth-press);
+  --shadow-field: var(--depth-field);
+  --shadow-surface: var(--depth-surface);
+  --shadow-overlay: var(--depth-overlay);
+
+  --ease-motion: var(--motion-ease);
+
+  --animate-fade-up: fade-up 250ms var(--motion-ease) both;
+  --animate-slide-in: slide-in 220ms var(--motion-ease) both;
+  --animate-pulse-soft: pulse-soft 1.6s ease-in-out infinite;
+  --animate-shine: shine 1.8s linear infinite;
+}
+
+/* border-line / border-line-field: hairline widths from the design language. */
+@utility border-line {
+  border-width: var(--line);
+  border-style: var(--line-style);
+}
+
+@utility border-line-field {
+  border-width: var(--line-field);
+  border-style: var(--line-style);
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes shine {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    /* Persian: no letter-spacing — it breaks glyph joining. */
+    letter-spacing: 0;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-size: 16.5px;
+    line-height: 1.8;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: var(--brand);
+    color: var(--brand-foreground);
+  }
+}
+
+/* Respect reduced motion: keep opacity-only transitions, stop loops. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
