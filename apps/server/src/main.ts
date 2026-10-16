@@ -16,21 +16,18 @@ import { buildApp } from "./api/server.js";
 async function main(): Promise<void> {
   const config = loadConfig();
   const ctx = createAppContext(config);
-  const app = await buildApp(ctx);
 
-  // Serve the built frontend (if present) with an SPA fallback. Non-API 404s
-  // fall back to index.html; API 404s keep the JSON envelope from buildApp.
+  // Detect the built frontend first so buildApp can wire the SPA fallback
+  // into its (single) root not-found handler.
   const here = path.dirname(fileURLToPath(import.meta.url));
   const webDist = path.resolve(here, "..", "..", "web", "dist");
-  if (existsSync(path.join(webDist, "index.html"))) {
+  const hasWebDist = existsSync(path.join(webDist, "index.html"));
+
+  const app = await buildApp(ctx, hasWebDist ? { spaIndexFile: "index.html" } : {});
+
+  if (hasWebDist) {
     const { default: fastifyStatic } = await import("@fastify/static");
     await app.register(fastifyStatic, { root: webDist });
-    app.setNotFoundHandler((req, reply) => {
-      if (req.method === "GET" && !req.url.startsWith("/api")) {
-        return reply.type("text/html; charset=utf-8").sendFile("index.html");
-      }
-      return reply.code(404).send({ error: { code: "not_found", message: "not found" } });
-    });
     console.log(`[nlo] serving web UI from ${webDist}`);
   } else {
     console.log("[nlo] web UI not built yet (apps/web/dist missing) — API only");

@@ -19,7 +19,19 @@ import { registerSettingsRoutes } from "./routes/settings.js";
  *  - consistent error envelope with redaction (never leak secrets/stacks)
  *  - CORS restricted to the Vite dev origin (loopback)
  */
-export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
+export interface BuildAppOptions {
+  /**
+   * When the built frontend should be served by this app, name of the
+   * index.html inside the static root (registered separately by main). The
+   * root not-found handler falls back to it for non-API GET requests.
+   */
+  spaIndexFile?: string;
+}
+
+export async function buildApp(
+  ctx: AppContext,
+  opts: BuildAppOptions = {},
+): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
     bodyLimit: ctx.config.maxUploadBytes,
@@ -53,7 +65,8 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   app.addHook("onRequest", async (req, reply) => {
     const token = ctx.config.adminToken;
     if (!token) return; // auth disabled (local single-user, loopback)
-    if (req.url.startsWith("/api/health")) return;
+    if (req.url.startsWith("/api/health")) return; // readiness is public
+    if (!req.url.startsWith("/api")) return; // only the API carries data (SPA static files are public)
     const header = req.headers.authorization;
     if (header === `Bearer ${token}`) return;
     return reply.code(401).send({
@@ -98,8 +111,11 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
     return reply.code(status).send(toApiErrorBody(err));
   });
 
-  app.setNotFoundHandler((_req, reply) => {
-    reply.code(404).send({ error: { code: ApiCodes.notFound, message: "not found" } });
+  app.setNotFoundHandler((req, reply) => {
+    if (opts.spaIndexFile && req.method === "GET" && !req.url.startsWith("/api")) {
+      return reply.type("text/html; charset=utf-8").sendFile(opts.spaIndexFile);
+    }
+    return reply.code(404).send({ error: { code: ApiCodes.notFound, message: "not found" } });
   });
 
   registerHealthRoutes(app, ctx);
