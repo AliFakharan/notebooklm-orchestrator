@@ -15,6 +15,12 @@ export interface AppConfig {
   liveTestsEnabled: boolean;
   /** SSRF allowlist for health checks (host[:port] entries). */
   healthAllowlist: string[];
+  /** Python interpreter for the notebooklm worker (default "python3"). */
+  pythonBin: string;
+  /** Hard timeout for a live job (ms). */
+  jobTimeoutMs: number;
+  /** Development only: allow live jobs without a proxy tunnel. */
+  allowDirectEgress: boolean;
 }
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..", "..");
@@ -94,6 +100,9 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     allowedAudioExtensions,
     liveTestsEnabled: boolEnv("NLO_LIVE_TESTS", false),
     healthAllowlist,
+    pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
+    jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
+    allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),
   };
 }
 
@@ -104,5 +113,7 @@ export function dataPaths(dataDir: string) {
     vaultDir: path.join(dataDir, "vault"),
     vaultKeyFile: path.join(dataDir, "vault.key"),
     tempDir: path.join(dataDir, "tmp"),
+    sessionsDir: path.join(dataDir, "sessions"),
+    vendorDir: path.join(dataDir, "vendor"),
   };
 }

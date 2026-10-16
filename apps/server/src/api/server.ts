@@ -9,6 +9,7 @@ import { registerJobRoutes } from "./routes/jobs.js";
 import { registerAccountRoutes } from "./routes/accounts.js";
 import { registerProxyRoutes } from "./routes/proxies.js";
 import { registerProviderRoutes } from "./routes/providers.js";
+import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 
 /**
@@ -123,6 +124,7 @@ export async function buildApp(
   registerAccountRoutes(app, ctx);
   registerProxyRoutes(app, ctx);
   registerProviderRoutes(app, ctx);
+  registerSessionRoutes(app, ctx);
   registerSettingsRoutes(app, ctx);
 
   return app;

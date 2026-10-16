@@ -12,6 +12,10 @@ export interface AccountRow {
   lastSuccessAt: string | null;
   lastError: string | null;
   quotaNote: string | null;
+  /** The provider profile bound to this account's auth session, if any. */
+  authProfile: string | null;
+  /** Last time the account's session was verified live (mirror of auth_sessions). */
+  lastVerifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,7 +78,14 @@ export class AccountsRepo {
     patch: Partial<
       Pick<
         AccountRow,
-        "label" | "displayEmail" | "status" | "enabled" | "authSecretRef" | "quotaNote"
+        | "label"
+        | "displayEmail"
+        | "status"
+        | "enabled"
+        | "authSecretRef"
+        | "quotaNote"
+        | "authProfile"
+        | "lastVerifiedAt"
       >
     >,
   ): AccountRow {
@@ -90,11 +101,14 @@ export class AccountsRepo {
       authSecretRef:
         patch.authSecretRef === undefined ? current.authSecretRef : patch.authSecretRef,
       quotaNote: patch.quotaNote === undefined ? current.quotaNote : patch.quotaNote,
+      authProfile: patch.authProfile === undefined ? current.authProfile : patch.authProfile,
+      lastVerifiedAt:
+        patch.lastVerifiedAt === undefined ? current.lastVerifiedAt : patch.lastVerifiedAt,
     };
     const now = this.db.now();
     this.db.raw
       .prepare(
-        `UPDATE accounts SET label=?, display_email=?, status=?, enabled=?, auth_secret_ref=?, quota_note=?, updated_at=?
+        `UPDATE accounts SET label=?, display_email=?, status=?, enabled=?, auth_secret_ref=?, quota_note=?, auth_profile=?, last_verified_at=?, updated_at=?
          WHERE id=?`,
       )
       .run(
@@ -104,6 +118,8 @@ export class AccountsRepo {
         next.enabled ? 1 : 0,
         next.authSecretRef,
         next.quotaNote,
+        next.authProfile,
+        next.lastVerifiedAt,
         now,
         id,
       );
@@ -145,6 +161,8 @@ export class AccountsRepo {
       lastSuccessAt: (row.last_success_at as string | null) ?? null,
       lastError: (row.last_error as string | null) ?? null,
       quotaNote: (row.quota_note as string | null) ?? null,
+      authProfile: (row.auth_profile as string | null) ?? null,
+      lastVerifiedAt: (row.last_verified_at as string | null) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };

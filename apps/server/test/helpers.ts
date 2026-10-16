@@ -56,6 +56,7 @@ export function makeParts(): TestParts {
     // IP-literal allowlist entry: deterministic, no DNS resolution needed.
     ["93.184.216.34:443"],
     async () => ({ ok: true, latencyMs: 1 }),
+    vault,
   );
   const provider = new MockProvider();
   const runner = new JobRunner({

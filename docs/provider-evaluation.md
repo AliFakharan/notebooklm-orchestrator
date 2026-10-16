@@ -60,3 +60,33 @@ apps/server/src/providers/
 | subprocess ناسالم              | spawn بدون shell، timeout، kill group، validate I/O                       |
 | duplicate side-effect در retry | retry فقط برای خطاهای retryable-classified؛ ambiguous → `NEEDS_ATTENTION` |
 | account rate-limit             | دسته‌بندی خطا + backoff + account rotation فقط اگر مجاز و بی‌خطر          |
+
+## ۵. وضعیت پیاده‌سازی (به‌روزرسانی — پس از فاز live)
+
+**آنچه واقعاً پیاده شده و قابل‌اجراست:**
+
+| لایه                                           | وضعیت واقعی (بدون ادعای «تست‌شده زنده» تا انجام واقعی)                                                                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PythonWorkerProvider` + supervisor + protocol | پیاده‌سازی‌شده؛ spawn بدون shell، timeout/kill، فایل request با ۰۶۰۰، پروتکل JSON-line با zod. **تست زنده انجام نشده** (نیازمند venv + ورود واقعی)         |
+| ورود واقعی (login)                             | پیاده‌سازی‌شده با Playwright (تعاملی، پنجره مرورگر) + import storage-state + verify در برابر سرویس واقعی؛ session در جدول `auth_sessions` با state machine |
+| runtime خارجی (`NLO_PROXY_RUNTIME=xray`)       | پیاده‌سازی‌شده: تونل واقعی VLESS (loopback CONNECT inbound)، fetch واقعی TLS از درون تونل، بررسی مرحله‌ای سلامت با evidence + category                     |
+| انتخاب شفاف نود/حساب + fail-closed             | پیاده‌سازی‌شده و **تست‌شده** (scenarios ۱–۱۱؛ هیچ fallback پنهانی به egress مستقیم نیست)                                                                   |
+| provenance نتیجه                               | هر job `resultProvenance` دارد (`real` / `mock` / `unknown`) — از گزارش خود provider خوانده می‌شود، نه فرض                                                 |
+
+**درگاه‌های اعتبارسنجی زنده (manual gate — هرگز در CI اجرا نمی‌شوند):**
+
+```
+npm run worker:setup --workspace @nlo/server    # data/venv + notebooklm-py + playwright chromium
+npm run verify:live  --workspace @nlo/server    # preflight → login/verify → real tunnel egress → manual job
+```
+
+خروجی `verify:live` شواهد چاپ‌شده می‌دهد (egress IP واقعی مشاهده‌شده از طریق تونل، email حساب تأییدشده،
+نکات دستی برای job زنده). تا این harness پاس نشود، هر خروجی live در UI با provenance `unknown` نمایش
+داده می‌شود — یعنی **سیستم خودش «زنده‌بودن» را ادعا نمی‌کند**.
+
+**محدودیت‌های باقی‌مانده (صادقانه):**
+
+- `cancelJob` در notebooklm-py هنوز پشتیبانی واقعی ندارد (فقط request؛ شغل ممکن است در provider ادامه یابد).
+- مسیر آپلود `.wav` مستند است؛ `mp3/m4a` هنوز تأییدنشده در provider.
+- `trust_env` در notebooklm-py یکسان روی همه clientها اثر نمی‌کند (U3)؛ به همین دلیل env-proxy worker
+  مکمل egress-verification است و جایگزین آن نمی‌شود.

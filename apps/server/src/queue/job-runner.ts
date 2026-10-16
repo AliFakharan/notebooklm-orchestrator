@@ -121,23 +121,34 @@ export class JobRunner {
         let handle: TunnelHandle | null = null;
         let nodeId: string | null = null;
         try {
-          const sel = this.d.proxyManager.select(
+          // select() validates (config + fresh healthy check) AND starts the
+          // tunnel; it throws when no node can provide a real route.
+          const sel = await this.d.proxyManager.select(
             this.d.jobs.getOrThrow(jobId).input.preferredNodeId,
           );
           nodeId = sel.node.id;
-          handle = await this.d.runtime.startTunnel(sel.node, (ref) => this.d.vault.get(ref));
+          handle = sel.handle;
           this.logEvent(
             jobId,
             archive,
             "proxy_selected",
-            `node ${sel.node.config.name} (tunnel up)`,
+            `node ${sel.node.config.name}; tunnel ${sel.handle.host}:${sel.handle.port} — ${sel.reason}`,
           );
+          for (const r of sel.rejected) {
+            this.logEvent(
+              jobId,
+              archive,
+              "proxy_candidate_rejected",
+              `node ${r.nodeId}: ${r.reason}`,
+            );
+          }
         } catch (err) {
+          const msg = redact(String(err));
           this.d.jobs.setStatus(jobId, "FAILED", {
             errorClass: "proxy",
-            errorMessage: `no approved proxy route available (fail-closed): ${redact(String(err))}`,
+            errorMessage: `no approved proxy route available (fail-closed): ${msg}`,
           });
-          this.logEvent(jobId, archive, "proxy_unavailable", redact(String(err)));
+          this.logEvent(jobId, archive, "proxy_unavailable", msg);
           this.finalizeArchive(jobId, archive);
           return this.d.jobs.getOrThrow(jobId);
         }
@@ -177,10 +188,15 @@ export class JobRunner {
           });
 
           this.d.accounts.recordSuccess(account.id);
+          const sim = result.providerMeta.simulated;
           this.d.jobs.setStatus(jobId, "SUCCEEDED", {
             answerMarkdown: result.answerMarkdown,
             resultProviderMeta: result.providerMeta,
             progress: 100,
+            // Provenance is measured from the provider's own report, never
+            // assumed: mock provider => "mock"; worker reports simulated
+            // false => "real"; anything else => "unknown" (shown as such).
+            resultProvenance: sim === true ? "mock" : sim === false ? "real" : "unknown",
           });
           if (result.answerMarkdown) archive.writeAnswer(result.answerMarkdown);
           this.logEvent(jobId, archive, "succeeded", "job completed");

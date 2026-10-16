@@ -26,6 +26,37 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 export type AccountStatus =
   "ACTIVE" | "DEGRADED" | "RATE_LIMITED" | "AUTH_REQUIRED" | "DISABLED" | "UNKNOWN";
 
+/**
+ * Real authentication session states (per account, per provider).
+ * A database status flag alone is NEVER evidence of authentication —
+ * only `AUTHENTICATED` (with a recent live verification) is.
+ */
+export type AuthSessionState =
+  | "CONFIGURED"
+  | "AUTH_REQUIRED"
+  | "AUTH_IN_PROGRESS"
+  | "AUTHENTICATED"
+  | "SESSION_EXPIRED"
+  | "SESSION_INVALID"
+  | "ACCESS_UNAVAILABLE"
+  | "DISABLED"
+  | "UNKNOWN";
+
+export interface AuthSession {
+  id: string;
+  accountId: string;
+  provider: string;
+  /** The provider-side profile name backing this account's session. */
+  profile: string;
+  email: string | null;
+  state: AuthSessionState;
+  /** Last time the session was verified against the real service. */
+  lastVerifiedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ProxyTransport = "tcp" | "ws" | "grpc";
 export type ProxySecurity = "none" | "tls" | "reality";
 
@@ -65,6 +96,20 @@ export interface ProxyNode {
   updatedAt: string;
 }
 
+/** Which diagnostic stage produced the health result. */
+export type HealthCategory =
+  | "config"
+  | "runtime"
+  | "listener"
+  | "transport"
+  | "tls"
+  | "upstream"
+  | "auth"
+  | "egress"
+  | "ssrf"
+  | "nbl_access"
+  | "unknown";
+
 export interface ProxyHealth {
   nodeId: string;
   lastCheckedAt: string | null;
@@ -72,6 +117,14 @@ export interface ProxyHealth {
   egressIp: string | null;
   latencyMs: number | null;
   error: string | null;
+  /** When the check started (distinct from completion). */
+  startedAt?: string | null;
+  /** The diagnostic destination actually tested (host:port). */
+  target?: string | null;
+  /** Which stage the result refers to. */
+  category?: HealthCategory | null;
+  /** Redacted evidence string (no secrets). */
+  evidence?: string | null;
 }
 
 export type ArtifactSource = "provider" | "application";
@@ -101,6 +154,8 @@ export interface JobInput {
   preferredNodeId: string | null;
 }
 
+export type ResultProvenance = "real" | "mock" | "unknown";
+
 export interface Job {
   id: string;
   status: JobStatus;
@@ -119,6 +174,13 @@ export interface Job {
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  // --- provenance (populated by the real provider) ---
+  notebookId?: string | null;
+  notebookTitle?: string | null;
+  sourceId?: string | null;
+  conversationId?: string | null;
+  operationIds?: Record<string, string> | null;
+  resultProvenance?: ResultProvenance;
 }
 
 export type FailureClass =

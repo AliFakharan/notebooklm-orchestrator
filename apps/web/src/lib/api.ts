@@ -335,16 +335,45 @@ export function proxyValidate(id: string): Promise<{ ok: boolean; issues: string
   return request(`/api/proxies/${id}/validate`, { method: "POST" });
 }
 
+export type HealthCategory =
+  "config" | "runtime" | "ssrf" | "tunnel" | "tls" | "upstream" | "egress" | "nbl_access";
+
 export interface ProxyHealthResult {
   node: MaskedProxyNode;
   ok: boolean;
   egressIp: string | null;
   latencyMs: number | null;
   error: string | null;
+  /** Which stage of the staged check decided the result. */
+  category?: HealthCategory;
+  /** Human-readable, evidence-based explanation (never a bare status word). */
+  evidence?: string | null;
+  target?: string | null;
+  startedAt?: string | null;
 }
 
-export function proxyHealthCheck(id: string): Promise<ProxyHealthResult> {
-  return request(`/api/proxies/${id}/health`, { method: "POST" });
+/**
+ * Run the staged health check. `target: "notebooklm"` probes the real
+ * destination (notebooklm.google.com:443) through the tunnel; the default
+ * probes the allowlisted egress-echo service.
+ */
+export function proxyHealthCheck(
+  id: string,
+  opts: { target?: "egress" | "notebooklm" } = {},
+): Promise<ProxyHealthResult> {
+  return request(`/api/proxies/${id}/health`, jsonInit("POST", opts));
+}
+
+export interface ProxyRuntimeStatus {
+  name: string;
+  state: "available" | "not_configured" | "error";
+  version?: string | null;
+  binaryPath?: string | null;
+  reason?: string;
+}
+
+export function proxyRuntimeStatus(): Promise<ProxyRuntimeStatus> {
+  return request("/api/proxies/runtime");
 }
 
 export function proxyConnectivity(
@@ -367,6 +396,109 @@ export interface ProviderInfo {
 export function providerInfo(): Promise<ProviderInfo> {
   return request("/api/provider");
 }
+
+/* --------------------------------- sessions --------------------------------- */
+
+export type AuthSessionState =
+  | "CONFIGURED"
+  | "AUTH_REQUIRED"
+  | "AUTH_IN_PROGRESS"
+  | "AUTHENTICATED"
+  | "SESSION_EXPIRED"
+  | "SESSION_INVALID"
+  | "ACCESS_UNAVAILABLE"
+  | "DISABLED"
+  | "UNKNOWN";
+
+export interface AuthSessionView {
+  id: string;
+  accountId: string;
+  provider: string;
+  profile: string;
+  email: string | null;
+  state: AuthSessionState;
+  lastVerifiedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionAccountView {
+  accountId: string;
+  account: {
+    id: string;
+    label: string;
+    enabled: boolean;
+    displayEmail: string;
+    authSecretRef: "present" | null;
+    authProfile: string | null;
+  } | null;
+  session: AuthSessionView | null;
+  sessionUsable: boolean;
+  hasStoredFile: boolean;
+}
+
+export interface SessionsOverview {
+  provider: string;
+  interactiveLogin: boolean;
+  sessions: SessionAccountView[];
+}
+
+export function sessionsList(): Promise<SessionsOverview> {
+  return request("/api/sessions");
+}
+
+export function sessionGet(accountId: string): Promise<SessionAccountView> {
+  return request(`/api/sessions/${accountId}`);
+}
+
+/** Start interactive browser login (blocks until sign-in completes or times out). */
+export function sessionLogin(
+  accountId: string,
+  opts: { timeoutSec?: number; headless?: boolean } = {},
+): Promise<{ session: AuthSessionView; email: string | null }> {
+  return request(`/api/sessions/${accountId}/login`, jsonInit("POST", opts));
+}
+
+export interface SessionVerifyResult {
+  ok: boolean;
+  email: string | null;
+  detail: string | null;
+  session?: AuthSessionView;
+  note?: string;
+  needsLogin?: boolean;
+}
+
+export function sessionVerify(accountId: string): Promise<SessionVerifyResult> {
+  return request(`/api/sessions/${accountId}/verify`, { method: "POST" });
+}
+
+export function sessionRefresh(accountId: string): Promise<SessionVerifyResult> {
+  return request(`/api/sessions/${accountId}/refresh`, { method: "POST" });
+}
+
+export function sessionImport(
+  accountId: string,
+  body: { base64?: string; serverPath?: string },
+): Promise<SessionVerifyResult> {
+  return request(`/api/sessions/${accountId}/import`, jsonInit("POST", body));
+}
+
+export function sessionLogout(accountId: string): Promise<{ ok: boolean }> {
+  return request(`/api/sessions/${accountId}`, { method: "DELETE" });
+}
+
+export const SESSION_STATE_LABELS: Record<AuthSessionState, string> = {
+  CONFIGURED: "پیکربندی‌شده",
+  AUTH_REQUIRED: "نیازمند ورود",
+  AUTH_IN_PROGRESS: "در حال ورود",
+  AUTHENTICATED: "واردشده (تأییدشده)",
+  SESSION_EXPIRED: "منقضی‌شده",
+  SESSION_INVALID: "نامعتبر",
+  ACCESS_UNAVAILABLE: "دسترسی در دسترس نیست",
+  DISABLED: "غیرفعال",
+  UNKNOWN: "نامشخص",
+};
 
 /* --------------------------------- settings --------------------------------- */
 

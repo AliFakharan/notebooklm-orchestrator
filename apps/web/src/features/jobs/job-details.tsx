@@ -242,10 +242,16 @@ function AnswerPanel({ job }: { job: Job }) {
       </Card>
     );
   }
+  const prov = job.resultProvenance ?? "unknown";
   return (
     <Card>
       <CardHeader>
-        <CardTitle>پاسخ</CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle>پاسخ</CardTitle>
+          {prov === "real" && <Badge variant="success">منبع: سرویس واقعی</Badge>}
+          {prov === "mock" && <Badge variant="secondary">منبع: شبیه‌ساز (mock)</Badge>}
+          {prov === "unknown" && <Badge variant="warning">منبع: نامشخص</Badge>}
+        </div>
       </CardHeader>
       <CardContent>
         {/* Markdown is rendered as plain text: no sanitization pipeline is

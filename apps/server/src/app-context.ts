@@ -2,14 +2,22 @@ import { mkdirSync } from "node:fs";
 import { dataPaths, loadConfig, type AppConfig } from "./config.js";
 import { Db } from "./db/db.js";
 import { AccountsRepo } from "./domain/accounts.repo.js";
+import { AuthSessionsRepo } from "./domain/auth-sessions.repo.js";
 import { JobsRepo } from "./domain/jobs.repo.js";
 import { ProxiesRepo } from "./domain/proxies.repo.js";
 import { SecretVault } from "./secrets/vault.js";
 import { MockProvider } from "./providers/mock-provider.js";
+import { PythonWorkerProvider } from "./providers/python-worker/python-worker-provider.js";
 import type { NotebookLMProvider } from "./providers/types.js";
-import { MockProxyRuntime, XrayProxyRuntimeStub, type ProxyRuntime } from "./proxy/runtime.js";
+import {
+  MockProxyRuntime,
+  XrayProxyRuntimeStub,
+  createXrayProxyRuntime,
+  type ProxyRuntime,
+} from "./proxy/runtime.js";
 import { MockProviderEgress } from "./proxy/egress.js";
 import { ProxyManager } from "./proxy/proxy-manager.js";
+import { fetchThroughTunnel } from "./proxy/connect-proxy.js";
 import { JobRunner } from "./queue/job-runner.js";
 import { Queue } from "./queue/queue.js";
 
@@ -22,6 +30,7 @@ export interface AppContext {
   db: Db;
   vault: SecretVault;
   accounts: AccountsRepo;
+  sessions: AuthSessionsRepo;
   proxies: ProxiesRepo;
   jobs: JobsRepo;
   provider: NotebookLMProvider;
@@ -42,17 +51,34 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
   const db = Db.open(paths.dbFile);
   const vault = SecretVault.open(db, { keyHex: config.vaultKey, keyFile: paths.vaultKeyFile });
   const accounts = new AccountsRepo(db);
+  const sessions = new AuthSessionsRepo(db);
   const proxies = new ProxiesRepo(db);
   const jobs = new JobsRepo(db);
 
-  // Provider: mock by default. The python-worker provider is a separate,
-  // approval-gated integration (docs/provider-evaluation.md).
-  const provider: NotebookLMProvider =
-    config.provider === "python-worker" ? createPythonWorkerProvider() : new MockProvider();
+  mkdirSync(paths.sessionsDir, { recursive: true, mode: 0o700 });
+  mkdirSync(paths.vendorDir, { recursive: true });
 
-  // Proxy runtime: mock by default; xray is a stub until approved.
+  // Provider selection is EXPLICIT and observable: config.provider decides.
+  // There is no silent fallback: "python-worker" must actually start.
+  const provider: NotebookLMProvider =
+    config.provider === "python-worker"
+      ? new PythonWorkerProvider({
+          sessionDir: paths.sessionsDir,
+          dataDir: config.dataDir,
+          pythonBin: config.pythonBin,
+          jobTimeoutMs: config.jobTimeoutMs,
+          allowDirect: config.allowDirectEgress,
+          log: (msg) => console.log(`[nlo:worker] ${msg}`),
+        })
+      : new MockProvider();
+
+  // Proxy runtime: mock by default; xray when the binary is present/approved.
+  // The stub remains as a safe last resort (reports not_configured, fails
+  // closed) — it is never a "working" runtime.
   const runtime: ProxyRuntime =
-    config.proxyRuntime === "xray" ? new XrayProxyRuntimeStub() : new MockProxyRuntime();
+    config.proxyRuntime === "xray"
+      ? createXrayProxyRuntime({ vendorDir: paths.vendorDir })
+      : new MockProxyRuntime();
 
   // Egress: the mock egress wires the provider to the mock runtime scenario.
   const mockRuntime = runtime as MockProxyRuntime;
@@ -69,7 +95,18 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     proxies,
     runtime,
     config.healthAllowlist,
-    async (_via, _dest) => ({ ok: true, latencyMs: 1 }),
+    // REAL connectivity: every health-check fetch goes out through the node's
+    // local tunnel (CONNECT + TLS via https-proxy-agent). There is no direct
+    // path: if no tunnel handle is present the check fails closed.
+    async (via, dest) => {
+      if (!via) {
+        return { ok: false, latencyMs: 0, error: "no tunnel available (fail-closed)" };
+      }
+      const r = await fetchThroughTunnel(via, dest);
+      return { ok: r.ok, body: r.body, latencyMs: r.latencyMs, error: r.error };
+    },
+    vault,
+    { log: (msg) => console.log(`[nlo:proxy] ${msg}`) },
   );
 
   const runner = new JobRunner({
@@ -103,6 +140,7 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     db,
     vault,
     accounts,
+    sessions,
     proxies,
     jobs,
     provider,
@@ -114,19 +152,8 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     close: async () => {
       await queue.stop();
       (provider as { dispose?: () => void }).dispose?.();
+      await (runtime as { close?: () => Promise<void> }).close?.();
       db.close();
     },
   };
-}
-
-/**
- * Placeholder for the approval-gated python worker provider. Building it
- * requires the notebooklm-py dependency + a live-approval step, so it is not
- * constructed by default. Importing this is a hard error until implemented.
- */
-function createPythonWorkerProvider(): NotebookLMProvider {
-  throw new Error(
-    "python-worker provider is not enabled in this build. Set NLO_PROVIDER=mock, " +
-      "or complete the gated integration described in docs/provider-evaluation.md.",
-  );
 }

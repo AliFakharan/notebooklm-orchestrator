@@ -8,7 +8,9 @@
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:live": "tsx scripts/verify-live.ts",
+    "worker:setup": "python3 -m venv ../../data/venv && ../../data/venv/bin/pip install -U pip -r python-requirements.txt && ../../data/venv/bin/playwright install chromium"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.0",
@@ -17,6 +19,7 @@
     "@fastify/static": "^8.0.0",
     "@nlo/shared": "*",
     "fastify": "^5.0.0",
+    "https-proxy-agent": "^7.0.6",
     "zod": "^3.24.2"
   },
   "devDependencies": {

@@ -151,7 +151,7 @@ describe("fail-closed egress (scenario 7): wrong egress IP on health check", () 
     });
     expect(res1.ok).toBe(true);
     // n2 has no successful health check yet -> n1 is the only healthy node.
-    const sel = parts.proxyManager.select(null);
+    const sel = await parts.proxyManager.select(null);
     expect(sel.node.id).toBe(n1.id);
   });
 });
@@ -164,7 +164,7 @@ describe("fail-closed egress (scenario 8): fallback node down", () => {
     markHealthy(parts.proxies, n1.id);
     markHealthy(parts.proxies, n2.id);
     markUnhealthy(parts.proxies, n1.id, "tunnel down");
-    const sel = parts.proxyManager.select(null);
+    const sel = await parts.proxyManager.select(null);
     expect(sel.node.id).toBe(n2.id); // fell back to n2
   });
 

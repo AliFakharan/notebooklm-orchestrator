@@ -1,6 +1,13 @@
 import { randomBytes } from "node:crypto";
 import type { Db } from "../db/db.js";
-import type { FailureClass, Job, JobEvent, JobInput, JobStatus } from "@nlo/shared";
+import type {
+  FailureClass,
+  Job,
+  JobEvent,
+  JobInput,
+  JobStatus,
+  ResultProvenance,
+} from "@nlo/shared";
 import { canTransition, transition } from "@nlo/shared";
 
 /**
@@ -65,7 +72,8 @@ export class JobsRepo {
       .prepare(
         `UPDATE jobs SET status=?, attempt=?, progress=?, progress_note=?,
            error_class=?, error_message=?, answer_markdown=?, result_provider_meta_json=?,
-           account_id=?, node_id=?, updated_at=?, finished_at=?
+           account_id=?, node_id=?, notebook_id=?, notebook_title=?, source_id=?, conversation_id=?,
+           operation_ids_json=?, result_provenance=?, updated_at=?, finished_at=?
          WHERE id=?`,
       )
       .run(
@@ -83,6 +91,17 @@ export class JobsRepo {
           : JSON.stringify(patch.resultProviderMeta),
         patch.accountId === undefined ? current.accountId : patch.accountId,
         patch.nodeId === undefined ? current.nodeId : patch.nodeId,
+        (patch.notebookId === undefined ? current.notebookId : patch.notebookId) ?? null,
+        (patch.notebookTitle === undefined ? current.notebookTitle : patch.notebookTitle) ?? null,
+        (patch.sourceId === undefined ? current.sourceId : patch.sourceId) ?? null,
+        (patch.conversationId === undefined ? current.conversationId : patch.conversationId) ??
+          null,
+        patch.operationIds === undefined
+          ? current.operationIds
+            ? JSON.stringify(current.operationIds)
+            : "{}"
+          : JSON.stringify(patch.operationIds ?? {}),
+        patch.resultProvenance ?? current.resultProvenance ?? "unknown",
         now,
         ["SUCCEEDED", "FAILED", "CANCELLED"].includes(to) ? now : null,
         id,
@@ -307,6 +326,14 @@ export class JobsRepo {
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
       finishedAt: (row.finished_at as string | null) ?? null,
+      notebookId: (row.notebook_id as string | null) ?? null,
+      notebookTitle: (row.notebook_title as string | null) ?? null,
+      sourceId: (row.source_id as string | null) ?? null,
+      conversationId: (row.conversation_id as string | null) ?? null,
+      operationIds: (row.operation_ids_json
+        ? JSON.parse(row.operation_ids_json as string)
+        : null) as Record<string, string> | null,
+      resultProvenance: (row.result_provenance as ResultProvenance | undefined) ?? "unknown",
     };
   }
 }

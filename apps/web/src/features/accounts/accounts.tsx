@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
-import { Boxes, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Boxes, KeyRound, LogIn, LogOut, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import {
   accountCreate,
   accountDelete,
   accountHealthCheck,
   accountUpdate,
   accountsList,
+  providerInfo,
+  sessionLogin,
+  sessionLogout,
+  sessionRefresh,
+  sessionsList,
+  SESSION_STATE_LABELS,
   type Account,
+  type ProviderInfo,
+  type SessionAccountView,
 } from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
@@ -42,11 +51,27 @@ export function AccountsPage() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<Account | null>(null);
   const [editing, setEditing] = useState<Account | null>(null);
+  const [provider, setProvider] = useState<ProviderInfo | null>(null);
+  const [sessions, setSessions] = useState<Record<string, SessionAccountView>>({});
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      setItems(await accountsList());
+      const [list, pInfo] = await Promise.all([accountsList(), providerInfo().catch(() => null)]);
+      setItems(list);
+      if (pInfo) {
+        setProvider(pInfo);
+        if (!pInfo.isMock) {
+          try {
+            const ov = await sessionsList();
+            setSessions(Object.fromEntries(ov.sessions.map((s) => [s.accountId, s])));
+          } catch {
+            /* sessions only exist with python-worker */
+          }
+        } else {
+          setSessions({});
+        }
+      }
     } catch (err) {
       setError(errMessage(err));
     }
@@ -82,6 +107,59 @@ export function AccountsPage() {
       toast({ title: "بررسی وضعیت ناموفق بود", description: errMessage(err), variant: "error" });
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const doLogin = async (a: Account) => {
+    setBusyId(a.id);
+    toast({
+      title: "در حال باز کردن مرورگر برای ورود…",
+      description:
+        "در پنجره‌ی مرورگر که باز می‌شود وارد گوگل شوید. این عملیات تا تکمیل یا انقضا طول می‌کشد.",
+      variant: "success",
+    });
+    try {
+      await sessionLogin(a.id, { timeoutSec: 600 });
+      toast({
+        title: "ورود موفق بود",
+        description: "جلسه ذخیره و در برابر سرویس واقعی تأیید شد.",
+        variant: "success",
+      });
+    } catch (err) {
+      toast({ title: "ورود ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setBusyId(null);
+      void load();
+    }
+  };
+
+  const doVerify = async (a: Account) => {
+    setBusyId(a.id);
+    try {
+      const res = await sessionRefresh(a.id);
+      toast({
+        title: res.ok ? "جلسه تأیید شد" : "جلسه معتبر نیست",
+        description: res.detail ?? undefined,
+        variant: res.ok ? "success" : "error",
+      });
+    } catch (err) {
+      toast({ title: "بررسی جلسه ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setBusyId(null);
+      void load();
+    }
+  };
+
+  const doLogout = async (a: Account) => {
+    setBusyId(a.id);
+    try {
+      await sessionLogout(a.id);
+      toast({ title: "جلسه حذف شد", variant: "success" });
+    } catch (err) {
+      toast({ title: "حذف جلسه ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setBusyId(null);
+      void load();
     }
   };
 
@@ -139,6 +217,7 @@ export function AccountsPage() {
               <TableRow>
                 <TableHead>حساب</TableHead>
                 <TableHead>وضعیت</TableHead>
+                {provider && !provider.isMock && <TableHead>جلسه (ورود واقعی)</TableHead>}
                 <TableHead>فعال</TableHead>
                 <TableHead>آخرین موفقیت</TableHead>
                 <TableHead>توضیح سقف</TableHead>
@@ -167,6 +246,17 @@ export function AccountsPage() {
                   <TableCell>
                     <AccountStatusBadge status={a.status} />
                   </TableCell>
+                  {provider && !provider.isMock && (
+                    <TableCell>
+                      <SessionCell
+                        view={sessions[a.id] ?? null}
+                        busy={busyId === a.id}
+                        onLogin={() => void doLogin(a)}
+                        onVerify={() => void doVerify(a)}
+                        onLogout={() => void doLogout(a)}
+                      />
+                    </TableCell>
+                  )}
                   <TableCell>
                     <Switch
                       checked={a.enabled}
@@ -418,4 +508,95 @@ function EditAccountDialog({
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : "خطای نامشخص";
+}
+
+/**
+ * SessionCell: shows the real auth-session state for an account and offers
+ * the three live actions (login / verify / logout). Only rendered when the
+ * active provider is the python-worker (mock has no real session).
+ */
+function SessionCell({
+  view,
+  busy,
+  onLogin,
+  onVerify,
+  onLogout,
+}: {
+  view: import("@/lib/api").SessionAccountView | null;
+  busy: boolean;
+  onLogin: () => void;
+  onVerify: () => void;
+  onLogout: () => void;
+}) {
+  const state = view?.session?.state ?? "UNKNOWN";
+  const email = view?.session?.email ?? null;
+  const verifiedAt = view?.session?.lastVerifiedAt ?? null;
+  const lastError = view?.session?.lastError ?? null;
+  const usable = view?.sessionUsable ?? false;
+
+  const variant: "success" | "warning" | "destructive" | "secondary" =
+    state === "AUTHENTICATED"
+      ? "success"
+      : state === "AUTH_IN_PROGRESS"
+        ? "warning"
+        : state === "SESSION_EXPIRED" ||
+            state === "SESSION_INVALID" ||
+            state === "ACCESS_UNAVAILABLE"
+          ? "destructive"
+          : "secondary";
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2">
+        <Badge variant={variant}>{SESSION_STATE_LABELS[state]}</Badge>
+        {email && (
+          <span className="max-w-32 truncate text-xs text-muted-foreground" dir="ltr" title={email}>
+            {email}
+          </span>
+        )}
+      </div>
+      {lastError && (
+        <p className="max-w-48 truncate text-xs text-destructive" title={lastError}>
+          {lastError}
+        </p>
+      )}
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="ورود"
+          title="ورود با مرورگر"
+          disabled={busy}
+          onClick={onLogin}
+        >
+          <LogIn />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="تأیید جلسه"
+          title="تأیید در برابر سرویس واقعی"
+          disabled={busy}
+          onClick={onVerify}
+        >
+          <KeyRound className={busy ? "animate-spin" : undefined} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="خروج"
+          title="حذف جلسه"
+          disabled={busy}
+          onClick={onLogout}
+        >
+          <LogOut />
+        </Button>
+        {verifiedAt && (
+          <span className="ms-1 text-xs text-muted-foreground">
+            <RelativeTime iso={verifiedAt} />
+          </span>
+        )}
+      </div>
+    </div>
+  );
 }

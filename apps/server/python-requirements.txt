@@ -1,0 +1,12 @@
+# Python worker dependencies (live mode only; NEVER used in mock mode).
+#
+# Install (one-time, into data/venv — created by: npm run worker:setup --workspace @nlo/server):
+#   python3 -m venv data/venv
+#   data/venv/bin/pip install -r apps/server/python-requirements.txt
+#   data/venv/bin/playwright install chromium
+#
+# Then point the server at the interpreter:
+#   NLO_PYTHON_BIN=$PWD/data/venv/bin/python
+
+notebooklm>=0.4.0
+playwright>=1.44.0

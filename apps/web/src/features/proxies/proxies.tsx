@@ -18,12 +18,14 @@ import {
   proxyDelete,
   proxyGet,
   proxyHealthCheck,
+  proxyRuntimeStatus,
   proxyUpdate,
   proxyValidate,
   proxiesList,
   type MaskedProxyNode,
   type ManualProxyInput,
   type ProxyPatch,
+  type ProxyRuntimeStatus,
 } from "@/lib/api";
 import { fa } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -63,12 +65,19 @@ export function ProxiesPage() {
   const [deleting, setDeleting] = useState<MaskedProxyNode | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
 
+  const [runtime, setRuntime] = useState<ProxyRuntimeStatus | null>(null);
+
   const load = useCallback(async () => {
     setError(null);
     try {
       setItems(await proxiesList());
     } catch (err) {
       setError(errMessage(err));
+    }
+    try {
+      setRuntime(await proxyRuntimeStatus());
+    } catch {
+      setRuntime(null);
     }
   }, []);
 
@@ -125,6 +134,25 @@ export function ProxiesPage() {
       </CardHeader>
       <CardContent>
         {error && <ErrorBanner message={error} onRetry={() => void load()} />}
+
+        {runtime && runtime.state !== "available" && (
+          <p className="mb-3 rounded-field border border-warning/40 bg-warning/10 p-3 text-xs leading-6">
+            <span className="font-medium">پراکسی‌رات‌تایم در دسترس نیست: </span>
+            <span dir="ltr" className="font-medium">
+              {runtime.name}
+            </span>{" "}
+            — {runtime.reason ?? ""}
+            {runtime.name === "xray" && (
+              <>
+                . فایل bin/xray را در{" "}
+                <code className="rounded bg-field px-1 py-0.5" dir="ltr">
+                  data/vendor/xray/xray
+                </code>{" "}
+                قرار دهید تا تونل‌های واقعی فعال شوند.
+              </>
+            )}
+          </p>
+        )}
 
         {!items ? (
           <div className="flex flex-col gap-2">
@@ -322,7 +350,7 @@ function ProxyDetail({
     void load();
   }, [load]);
 
-  const run = async (kind: "validate" | "connectivity" | "health") => {
+  const run = async (kind: "validate" | "connectivity" | "health" | "health_nbl") => {
     setBusy(kind);
     try {
       if (kind === "validate") {
@@ -340,10 +368,16 @@ function ProxyDetail({
           variant: res.ok ? "success" : "error",
         });
       } else {
-        const res = await proxyHealthCheck(nodeId);
+        const res = await proxyHealthCheck(
+          nodeId,
+          kind === "health_nbl" ? { target: "notebooklm" } : {},
+        );
         toast({
           title: res.ok ? "سلامت کامل تأیید شد" : "سلامت تأیید نشد",
-          description: res.error ?? (res.egressIp ? `خروجی: ${res.egressIp}` : undefined),
+          description:
+            res.evidence ??
+            res.error ??
+            (res.egressIp ? `خروجی مشاهده‌شده: ${res.egressIp}` : undefined),
           variant: res.ok ? "success" : "error",
         });
         onHealth();
@@ -401,7 +435,16 @@ function ProxyDetail({
             onClick={() => void run("health")}
           >
             <RefreshCw className={busy === "health" ? "animate-spin" : undefined} />
-            {busy === "health" ? "در حال بررسی…" : "بررسی سلامت کامل"}
+            {busy === "health" ? "در حال بررسی…" : "سلامت (امتحان خروج)"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy !== null}
+            onClick={() => void run("health_nbl")}
+          >
+            <RefreshCw className={busy === "health_nbl" ? "animate-spin" : undefined} />
+            {busy === "health_nbl" ? "در حال بررسی…" : "سلامت (مقصد NotebookLM)"}
           </Button>
         </div>
       </div>
@@ -443,6 +486,20 @@ function ProxyDetail({
               )}
               {health.latencyMs !== null && (
                 <p className="text-muted-foreground">تأخیر: {fa(health.latencyMs)} ms</p>
+              )}
+              {health.target && (
+                <p className="text-muted-foreground">
+                  مقصد امتحان: <span dir="ltr">{health.target}</span>
+                </p>
+              )}
+              {health.evidence && (
+                <p
+                  className={`max-h-28 overflow-auto whitespace-pre-wrap rounded-field border-border bg-field p-2 ${
+                    health.ok ? "text-muted-foreground" : "text-destructive"
+                  }`}
+                >
+                  {health.evidence}
+                </p>
               )}
               {health.error && <p className="text-destructive">{health.error}</p>}
             </>

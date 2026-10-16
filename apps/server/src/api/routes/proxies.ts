@@ -149,10 +149,26 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
     return ctx.proxyManager.validateConfig(node);
   });
 
-  // Full health check (tunnel + egress + destination), SSRF-guarded.
+  // Runtime availability (binary present? configured?).
+  app.get("/api/proxies/runtime", async () => ctx.runtime.status());
+
+  // Full STAGED health check (config -> runtime -> tunnel -> REAL fetch
+  // through the tunnel), SSRF-guarded. `target` selects the destination:
+  //   "egress"      (default) — first allowlist entry (an IP-echo service)
+  //   "notebooklm"        — notebooklm.google.com:443 (real target proof)
+  // Both targets must be allowlisted; anything else is refused (SSRF guard).
+  const healthBody = z
+    .object({
+      target: z.enum(["egress", "notebooklm"]).optional(),
+    })
+    .optional();
   app.post<{ Params: { id: string } }>("/api/proxies/:id/health", async (req) => {
     const node = ctx.proxies.getOrThrow(req.params.id);
-    const dest = destFromAllowlist(ctx);
+    const body = healthBody?.parse(req.body ?? {});
+    const dest =
+      body?.target === "notebooklm"
+        ? { host: "notebooklm.google.com", port: 443 }
+        : destFromAllowlist(ctx);
     const result = await ctx.proxyManager.runHealthCheck(node.id, dest);
     const refreshed = ctx.proxies.get(node.id);
     if (!refreshed) throw new ApiError(ApiCodes.notFound, "node not found", 404);

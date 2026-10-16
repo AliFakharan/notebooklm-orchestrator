@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db/db.js";
-import type { ProxyNode, ProxyNodeConfig, ProxyHealth } from "@nlo/shared";
+import type { ProxyNode, ProxyNodeConfig, ProxyHealth, HealthCategory } from "@nlo/shared";
 
 export class ProxiesRepo {
   constructor(private readonly db: Db) {}
@@ -129,6 +129,10 @@ export class ProxiesRepo {
       egressIp: (row.egress_ip as string | null) ?? null,
       latencyMs: (row.latency_ms as number | null) ?? null,
       error: (row.error as string | null) ?? null,
+      startedAt: (row.started_at as string | null) ?? null,
+      target: (row.target as string | null) ?? null,
+      category: (row.category as HealthCategory | null) ?? null,
+      evidence: (row.evidence as string | null) ?? null,
     };
   }
 
@@ -136,22 +140,48 @@ export class ProxiesRepo {
     const now = this.db.now();
     this.db.raw
       .prepare(
-        `INSERT INTO proxy_health (node_id, last_checked_at, ok, egress_ip, latency_ms, error)
-         VALUES (?,?,?,?,?,?)
+        `INSERT INTO proxy_health (node_id, last_checked_at, ok, egress_ip, latency_ms, error, started_at, target, category, evidence)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(node_id) DO UPDATE SET
            last_checked_at=excluded.last_checked_at,
            ok=excluded.ok,
            egress_ip=excluded.egress_ip,
            latency_ms=excluded.latency_ms,
-           error=excluded.error`,
+           error=excluded.error,
+           started_at=excluded.started_at,
+           target=excluded.target,
+           category=excluded.category,
+           evidence=excluded.evidence`,
       )
-      .run(nodeId, now, h.ok ? 1 : 0, h.egressIp, h.latencyMs, h.error);
+      .run(
+        nodeId,
+        now,
+        h.ok ? 1 : 0,
+        h.egressIp ?? null,
+        h.latencyMs ?? null,
+        h.error ?? null,
+        h.startedAt ?? null,
+        h.target ?? null,
+        h.category ?? null,
+        h.evidence ?? null,
+      );
     this.db.raw
       .prepare(
-        `INSERT INTO proxy_health_history (node_id, checked_at, ok, egress_ip, latency_ms, error)
-         VALUES (?,?,?,?,?,?)`,
+        `INSERT INTO proxy_health_history (node_id, checked_at, ok, egress_ip, latency_ms, error, started_at, target, category, evidence)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
       )
-      .run(nodeId, now, h.ok ? 1 : 0, h.egressIp, h.latencyMs, h.error);
+      .run(
+        nodeId,
+        now,
+        h.ok ? 1 : 0,
+        h.egressIp ?? null,
+        h.latencyMs ?? null,
+        h.error ?? null,
+        h.startedAt ?? null,
+        h.target ?? null,
+        h.category ?? null,
+        h.evidence ?? null,
+      );
     // Keep the history table bounded (most recent 200 per node).
     this.db.raw
       .prepare(
@@ -175,10 +205,15 @@ export class ProxiesRepo {
     egressIp: string | null;
     latencyMs: number | null;
     error: string | null;
+    startedAt: string | null;
+    target: string | null;
+    category: string | null;
+    evidence: string | null;
   }[] {
     const rows = this.db.raw
       .prepare(
-        `SELECT checked_at AS checkedAt, ok, egress_ip AS egressIp, latency_ms AS latencyMs, error
+        `SELECT checked_at AS checkedAt, ok, egress_ip AS egressIp, latency_ms AS latencyMs, error,
+                started_at AS startedAt, target, category, evidence
          FROM proxy_health_history WHERE node_id = ? ORDER BY id DESC LIMIT ?`,
       )
       .all(nodeId, limit) as unknown as {
@@ -187,6 +222,10 @@ export class ProxiesRepo {
       egressIp: string | null;
       latencyMs: number | null;
       error: string | null;
+      startedAt: string | null;
+      target: string | null;
+      category: string | null;
+      evidence: string | null;
     }[];
     return rows.map((r) => ({ ...r, ok: Boolean(r.ok) }));
   }

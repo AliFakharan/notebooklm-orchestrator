@@ -121,11 +121,26 @@ export function ProvidersPage() {
               {info.liveDisabled ? "غیرفعال (NLO_LIVE_TESTS=0)" : "فعال"}
             </p>
           </div>
-          {info.isMock && (
+          {info.isMock ? (
             <p className="mt-1 rounded-field border border-border bg-field/50 p-3 text-xs leading-6 text-muted-foreground">
               همه‌ی خروجی‌های این بخش (پاسخ‌ها، رویدادها، فایل‌ها) توسط شبیه‌ساز تولید شده‌اند و هیچ
               درخواستی به سرویس واقعی NotebookLM ارسال نشده است.
             </p>
+          ) : (
+            <div className="mt-1 flex flex-col gap-2">
+              <p className="rounded-field border border-brand/40 bg-brand/10 p-3 text-xs leading-6">
+                حالت <span className="font-medium">زنده</span> فعال است: درخواست‌ها از طریق پراکسی
+                انتخاب‌شده به سرویس واقعی NotebookLM می‌روند و ورود حساب از صفحه‌ی «حساب‌ها» (ورود
+                واقعی با مرورگر) انجام می‌شود.
+              </p>
+              <p className="text-xs leading-6 text-muted-foreground">
+                اعتبارسنجی زنده (ورود واقعی، مسیر واقعی پراکسی، شغول واقعی):{" "}
+                <code className="rounded bg-field px-1 py-0.5" dir="ltr">
+                  npm run verify:live --workspace @nlo/server
+                </code>
+                . منبع هر نتیجه (واقعی/شبیه‌سازی‌شده) در صفحه‌ی شغل ثبت و نمایش داده می‌شود.
+              </p>
+            </div>
           )}
         </CardContent>
       </Card>

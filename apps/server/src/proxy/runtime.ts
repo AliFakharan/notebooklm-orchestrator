@@ -1,5 +1,8 @@
 import { createServer, type Server } from "node:net";
 import { AddressInfo } from "node:net";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import path from "node:path";
 import type { ProxyNode } from "@nlo/shared";
 
 /**
@@ -42,6 +45,8 @@ export interface ProxyRuntime {
   status(): RuntimeStatus;
   startTunnel(node: ProxyNode, getSecret: (ref: string) => string): Promise<TunnelHandle>;
   stopTunnel(nodeId: string): Promise<void>;
+  /** Release all tunnels/processes. No-op for stateless runtimes. */
+  close(): Promise<void>;
   /**
    * Health check performed THROUGH the tunnel. `fetchThrough` is injected so
    * the runtime stays decoupled from the HTTP layer and tests can observe
@@ -152,6 +157,10 @@ export class MockProxyRuntime implements ProxyRuntime {
     }
   }
 
+  async close(): Promise<void> {
+    for (const id of [...this.tunnels.keys()]) await this.stopTunnel(id);
+  }
+
   async healthCheck(
     handle: TunnelHandle,
     dest: { host: string; port: number },
@@ -207,10 +216,308 @@ export class MockProxyRuntime implements ProxyRuntime {
 }
 
 /**
- * Xray runtime stub. Installing/downloading the Xray binary, validating its
- * integrity, and configuring per-tunnel listeners is a gated step that
- * requires explicit user approval (docs/proxy-design.md §7). Until then the
- * runtime reports `not_configured` and every operation fails closed.
+ * REAL Xray runtime.
+ *
+ * startTunnel:
+ *   - resolves the node's VLESS UUID from the secret vault (never logged)
+ *   - writes a 0600 Xray config into the data dir: ONE loopback inbound
+ *     (protocol "http" — accepts CONNECT) routed to a single VLESS outbound
+ *     built from the node's transport/security parameters
+ *   - spawns `xray` (official binary from data/vendor/, no system install)
+ *     in its own process group; the listener binds 127.0.0.1:0 (ephemeral)
+ *   - waits for xray's "listener started at host:port" log line (10s budget)
+ *
+ * stopTunnel: SIGTERM the group, escalate to SIGKILL, remove the config.
+ *
+ * The local HTTP listener is a REAL proxy: CONNECT through it must produce a
+ * working TLS session to the destination. That is what healthCheck verifies
+ * via the injected `fetchThrough` (a real CONNECT+TLS fetcher in production).
+ */
+export class XrayProxyRuntime implements ProxyRuntime {
+  readonly name = "xray";
+  private tunnels = new Map<
+    string,
+    { proc: ChildProcess; cfgPath: string; host: string; port: number }
+  >();
+
+  constructor(
+    private readonly binPath: string,
+    private readonly cfgDir: string,
+    private readonly log: (line: string) => void = () => {},
+  ) {}
+
+  status(): RuntimeStatus {
+    if (!existsSync(this.binPath)) {
+      return {
+        state: "not_configured",
+        name: "xray",
+        reason: `Xray binary not found at ${this.binPath}. Install it (data/vendor/) and re-select this runtime.`,
+      };
+    }
+    return { state: "available", name: "xray" };
+  }
+
+  private buildXrayConfig(node: ProxyNode, uuid: string): string {
+    const cfg = node.config;
+    const user: Record<string, unknown> = { id: uuid, encryption: "none" };
+    if (cfg.flow) user["flow"] = cfg.flow;
+
+    const stream: Record<string, unknown> = { network: cfg.transport };
+    if (cfg.security === "tls") {
+      stream["security"] = "tls";
+      stream["tlsSettings"] = {
+        serverName: cfg.sni ?? cfg.server,
+        ...(cfg.alpn ? { alpn: cfg.alpn.split(",").map((s) => s.trim()) } : {}),
+      };
+    } else if (cfg.security === "reality") {
+      stream["security"] = "reality";
+      stream["realitySettings"] = {
+        serverName: cfg.sni ?? cfg.server,
+        fingerprint: "chrome",
+        publicKey: cfg.pbk ?? "",
+        shortId: cfg.sid ?? "",
+        ...(cfg.spx ? { spiderX: cfg.spx } : {}),
+      };
+    }
+    if (cfg.transport === "ws") {
+      stream["wsSettings"] = {
+        path: cfg.wsPath ?? "/",
+        headers: cfg.wsHost ? { Host: cfg.wsHost } : {},
+      };
+    }
+    if (cfg.transport === "grpc") {
+      stream["grpcSettings"] = {
+        serviceName: (cfg.extra["serviceName"] ?? "").trim() || "grpc",
+      };
+    }
+
+    const config = {
+      log: { loglevel: "warning" },
+      inbounds: [
+        {
+          tag: "nlo-local-http",
+          listen: "127.0.0.1",
+          port: 0,
+          protocol: "http",
+        },
+      ],
+      outbounds: [
+        {
+          tag: "nlo-vless",
+          protocol: "vless",
+          settings: {
+            vnext: [{ address: cfg.server, port: cfg.port, users: [user] }],
+          },
+          streamSettings: stream,
+        },
+        { tag: "nlo-direct", protocol: "freedom" },
+      ],
+      routing: {
+        rules: [{ inboundTag: ["nlo-local-http"], outboundTag: "nlo-vless" }],
+      },
+    };
+    return JSON.stringify(config, null, 2);
+  }
+
+  async startTunnel(node: ProxyNode, getSecret: (ref: string) => string): Promise<TunnelHandle> {
+    const existing = this.tunnels.get(node.id);
+    if (existing) return { nodeId: node.id, host: existing.host, port: existing.port };
+
+    const status = this.status();
+    if (status.state !== "available") {
+      throw new ProxyRuntimeError((status as { reason: string }).reason, "runtime_not_configured");
+    }
+    const uuid = getSecret(node.config.uuidSecretRef);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) {
+      throw new ProxyRuntimeError("stored uuid failed validation", "bad_secret");
+    }
+
+    mkdirSync(this.cfgDir, { recursive: true, mode: 0o700 });
+    const cfgPath = path.join(this.cfgDir, `xray-${node.id}.json`);
+    writeFileSync(cfgPath, this.buildXrayConfig(node, uuid), { mode: 0o600 });
+
+    const proc = spawn(this.binPath, ["-c", cfgPath, "--loglevel", "info"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      detached: process.platform !== "win32",
+      env: { ...process.env },
+    });
+
+    const port = await new Promise<number>((resolve, reject) => {
+      let buf = "";
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new ProxyRuntimeError(
+            "xray did not start its listener within 10s",
+            "runtime_start_timeout",
+          ),
+        );
+      }, 10_000);
+      const onErr = (err: Error) => {
+        cleanup();
+        clearTimeout(timer);
+        reject(new ProxyRuntimeError(`xray process error: ${err.message}`, "runtime_error"));
+      };
+      const cleanup = () => {
+        proc.stderr?.off("data", onData);
+        proc.off("error", onErr);
+        proc.off("exit", onExit);
+      };
+      const onData = (chunk: Buffer) => {
+        buf += chunk.toString("utf8");
+        if (buf.length > 1_000_000) buf = buf.slice(-100_000);
+        const m = buf.match(/listener started at ([\d.]+):(\d+)/);
+        if (m) {
+          clearTimeout(timer);
+          cleanup();
+          resolve(Number(m[2]));
+          return;
+        }
+        if (/error:|fatal:|panic:/i.test(buf.slice(-4000))) {
+          const tail = buf.slice(-600).replace(/\s+/g, " ");
+          cleanup();
+          clearTimeout(timer);
+          reject(new ProxyRuntimeError(`xray failed to start: ${tail}`, "runtime_error"));
+        }
+      };
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        cleanup();
+        clearTimeout(timer);
+        reject(
+          new ProxyRuntimeError(
+            `xray exited early (code=${code}, signal=${signal ?? "none"})`,
+            "runtime_error",
+          ),
+        );
+      };
+      proc.stderr?.on("data", onData);
+      proc.on("error", onErr);
+      proc.on("exit", onExit);
+    }).catch((e) => {
+      this.killProc(proc);
+      try {
+        rmSync(cfgPath, { force: true });
+      } catch {
+        /* ignore */
+      }
+      throw e;
+    });
+
+    proc.on("exit", () => {
+      // Unexpected death: drop the tunnel so the next selection sees it.
+      if (this.tunnels.get(node.id)?.proc === proc) {
+        this.tunnels.delete(node.id);
+        try {
+          rmSync(cfgPath, { force: true });
+        } catch {
+          /* ignore */
+        }
+        this.log(`xray tunnel for ${node.config.name} exited unexpectedly`);
+      }
+    });
+
+    this.tunnels.set(node.id, { proc, cfgPath, host: "127.0.0.1", port });
+    this.log(`xray tunnel up for ${node.config.name} on 127.0.0.1:${port} (pid=${proc.pid})`);
+    return { nodeId: node.id, host: "127.0.0.1", port };
+  }
+
+  private killProc(proc: ChildProcess): void {
+    if (proc.pid === undefined) return;
+    const pid = proc.pid;
+    try {
+      if (process.platform !== "win32") process.kill(-pid, "SIGTERM");
+      else proc.kill("SIGTERM");
+    } catch {
+      /* gone */
+    }
+    setTimeout(() => {
+      try {
+        if (process.platform !== "win32") process.kill(-pid, "SIGKILL");
+        else proc.kill("SIGKILL");
+      } catch {
+        /* gone */
+      }
+    }, 4000).unref?.();
+  }
+
+  async stopTunnel(nodeId: string): Promise<void> {
+    const t = this.tunnels.get(nodeId);
+    if (!t) return;
+    this.tunnels.delete(nodeId);
+    this.killProc(t.proc);
+    try {
+      rmSync(t.cfgPath, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async close(): Promise<void> {
+    for (const id of [...this.tunnels.keys()]) await this.stopTunnel(id);
+  }
+
+  /**
+   * Real health: the injected `fetchThrough` performs an actual CONNECT + TLS
+   * request via the tunnel. When the destination is an egress-IP echo service,
+   * its body (the observed public IP) is returned as `egressIp` — measured,
+   * never invented.
+   */
+  async healthCheck(
+    handle: TunnelHandle,
+    dest: { host: string; port: number },
+    fetchThrough: (
+      via: TunnelHandle | null,
+      dest: { host: string; port: number },
+    ) => Promise<{ ok: boolean; body?: string; latencyMs: number; error?: string }>,
+  ): Promise<{
+    ok: boolean;
+    egressIp: string | null;
+    latencyMs: number | null;
+    error: string | null;
+  }> {
+    const started = Date.now();
+    const res = await fetchThrough(handle, dest);
+    const latencyMs = Date.now() - started;
+    if (!res.ok) {
+      return {
+        ok: false,
+        egressIp: null,
+        latencyMs,
+        error: res.error ?? "fetch through tunnel failed",
+      };
+    }
+    const body = (res.body ?? "").trim();
+    const looksLikeIp =
+      /^\d{1,3}(\.\d{1,3}){3}([:/].*)?$/.test(body) || /^\d{1,3}(\.\d{1,3}){3}$/.test(body);
+    const isEcho = /ipify|ifconfig|ip\.|public-ip|api\.ip/.test(dest.host);
+    const egressIp = isEcho && looksLikeIp ? (body.split(/[:/\s]/)[0] ?? null) : null;
+    return { ok: true, egressIp, latencyMs, error: null };
+  }
+}
+
+/**
+ * Factory: real runtime when the binary exists, otherwise the safe stub
+ * (never a "working" runtime — it reports not_configured and fails closed).
+ */
+export function createXrayProxyRuntime(opts: {
+  vendorDir: string;
+  binPath?: string;
+  log?: (line: string) => void;
+}): ProxyRuntime {
+  const binPath = opts.binPath ?? path.join(opts.vendorDir, "xray");
+  const log = opts.log ?? (() => {});
+  if (existsSync(binPath)) {
+    log(`xray runtime enabled: ${binPath}`);
+    return new XrayProxyRuntime(binPath, path.join(opts.vendorDir, "cfg"), log);
+  }
+  log("xray binary not found — using safe stub (not_configured, fail-closed)");
+  return new XrayProxyRuntimeStub();
+}
+
+/**
+ * Xray runtime stub. Kept as the safe fallback when no binary is present:
+ * it reports `not_configured` and every operation fails closed — it is never
+ * a working runtime and never fabricates health.
  */
 export class XrayProxyRuntimeStub implements ProxyRuntime {
   readonly name = "xray";
@@ -229,6 +536,10 @@ export class XrayProxyRuntimeStub implements ProxyRuntime {
 
   async stopTunnel(): Promise<void> {
     // nothing to stop
+  }
+
+  async close(): Promise<void> {
+    // nothing to release
   }
 
   async healthCheck(): Promise<{
