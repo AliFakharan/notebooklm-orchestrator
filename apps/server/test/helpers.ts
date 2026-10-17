@@ -57,6 +57,10 @@ export function makeParts(): TestParts {
     ["93.184.216.34:443"],
     async () => ({ ok: true, latencyMs: 1 }),
     vault,
+    {
+      // Self-heal re-check target must match the allowlist (no DNS in tests).
+      selfHealTarget: { host: "93.184.216.34", port: 443 },
+    },
   );
   const provider = new MockProvider();
   const runner = new JobRunner({
@@ -137,6 +141,18 @@ export function markHealthy(proxies: ProxiesRepo, nodeId: string): void {
     },
     nodeId,
   );
+}
+
+/** A previously-healthy result aged past the 10-minute freshness TTL.
+ *  (setHealth() stamps db.now() on insert, so age the row directly.) */
+export function markStaleHealthy(proxies: ProxiesRepo, nodeId: string): void {
+  markHealthy(proxies, nodeId);
+  const db = (
+    proxies as unknown as { db: { raw: { prepare(s: string): { run(...a: unknown[]): void } } } }
+  ).db;
+  db.raw
+    .prepare("UPDATE proxy_health SET last_checked_at = ? WHERE node_id = ?")
+    .run(new Date(Date.now() - 11 * 60 * 1000).toISOString(), nodeId);
 }
 
 export function markUnhealthy(proxies: ProxiesRepo, nodeId: string, error = "failed"): void {

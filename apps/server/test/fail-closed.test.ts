@@ -6,6 +6,7 @@ import {
   createJob,
   makeParts,
   markHealthy,
+  markStaleHealthy,
   markUnhealthy,
   type TestParts,
 } from "./helpers.js";
@@ -156,6 +157,28 @@ describe("fail-closed egress (scenario 7): wrong egress IP on health check", () 
   });
 });
 
+describe("stale health self-heal (selectAuto)", () => {
+  it("re-checks a previously-healthy node after the TTL passes and proceeds", async () => {
+    parts = makeParts();
+    addAccount(parts.accounts, "acct-1");
+    const node = addNode(parts.proxies, parts.vault, "n1");
+    markStaleHealthy(parts.proxies, node.id); // 11 minutes old: past the TTL
+    // Plain select() must reject the stale health (fail-closed)...
+    await expect(parts.proxyManager.select(null)).rejects.toThrow(/no healthy proxy node/i);
+    // ...but selectAuto() self-heals: real staged re-check through the (mock)
+    // tunnel proves the route, then the job proceeds.
+    const job = createJob(parts.jobs);
+    const result = await parts.runner.run(job.id);
+    expect(result.status).toBe("SUCCEEDED");
+    // The re-check was recorded as a fresh, ok health result.
+    const h = parts.proxies.health(node.id)!;
+    expect(h.ok).toBe(true);
+    expect(h.lastCheckedAt).toBeTruthy();
+    expect(Date.now() - Date.parse(h.lastCheckedAt!)).toBeLessThan(60_000);
+    noDirectEgress();
+  });
+});
+
 describe("fail-closed egress (scenario 8): fallback node down", () => {
   it("select() prefers the healthy fallback node", async () => {
     parts = makeParts();
@@ -177,6 +200,10 @@ describe("fail-closed egress (scenario 8): fallback node down", () => {
     markHealthy(parts.proxies, n2.id);
     markUnhealthy(parts.proxies, n1.id, "down");
     markUnhealthy(parts.proxies, n2.id, "down");
+    // The self-heal re-check (selectAuto) must ALSO fail: the tunnels
+    // themselves are down, so even a fresh staged check cannot prove a route.
+    parts.runtime.setScenario(n1.id, "down");
+    parts.runtime.setScenario(n2.id, "down");
     const job = createJob(parts.jobs);
     const result = await parts.runner.run(job.id);
     expect(result.status).toBe("FAILED");

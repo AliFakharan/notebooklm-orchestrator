@@ -49,6 +49,8 @@ export class ProxyManager {
   private allowlist: AllowEntry[];
   /** TTL after which a previously-healthy result is no longer trusted. */
   private readonly healthTtlMs: number;
+  /** Destination used by the self-heal re-check (must be allowlisted). */
+  private readonly selfHealTarget: { host: string; port: number };
 
   private readonly logFn: (line: string) => void;
 
@@ -67,10 +69,15 @@ export class ProxyManager {
       error?: string;
     }>,
     private readonly vault: SecretVault,
-    opts: { healthTtlMs?: number; log?: (line: string) => void } = {},
+    opts: {
+      healthTtlMs?: number;
+      selfHealTarget?: { host: string; port: number };
+      log?: (line: string) => void;
+    } = {},
   ) {
     this.allowlist = allowlistRaw.map((s) => parseAllowEntry(s));
     this.healthTtlMs = opts.healthTtlMs ?? 10 * 60_000;
+    this.selfHealTarget = opts.selfHealTarget ?? { host: "notebooklm.google.com", port: 443 };
     this.logFn = opts.log ?? (() => {});
   }
 
@@ -142,8 +149,50 @@ export class ProxyManager {
     throw new Error(
       sawAnyFresh
         ? "healthy proxy nodes exist but none could establish a tunnel (fail-closed)"
-        : "no healthy proxy node available (fail-closed: refusing direct egress); run a health check on a node first",
+        : "no healthy proxy node available (fail-closed: refusing direct egress)",
     );
+  }
+
+  /**
+   * Select with self-healing: when no node has a FRESH healthy check, run the
+   * real staged health check against the actual NotebookLM target (SSRF-
+   * guarded, allowlisted, evidence persisted) and retry selection. This is
+   * what makes jobs and auth flows work after the 10-minute health TTL
+   * passes, without asking the user to click "health check" first.
+   *
+   * Still fail-closed: the check is real (CONNECT + TLS + HTTP through the
+   * tunnel), and a failed check is a failed route — never a direct fallback.
+   */
+  async selectAuto(preferredNodeId: string | null): Promise<SelectionInfo> {
+    try {
+      return await this.select(preferredNodeId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Only self-heal when the problem is "nothing fresh/healthy"; other
+      // failures (no enabled node, tunnel failures with fresh checks) rethrow.
+      if (!/no healthy proxy node available/.test(msg)) throw err;
+
+      const enabled = this.repo.list().filter((n) => n.enabled);
+      if (enabled.length === 0) throw err;
+
+      // Re-check the best candidate: the preferred node when given, else the
+      // top-priority enabled one. The target is the real service, so a pass
+      // proves NotebookLM reachability from that egress, not generic DNS.
+      const byId = new Map(enabled.map((n) => [n.id, n]));
+      const checkTarget =
+        (preferredNodeId && byId.get(preferredNodeId)) ||
+        [...enabled].sort((a, b) => a.priority - b.priority)[0]!;
+      this.log(
+        `no fresh proxy health — running staged check on ${checkTarget.config.name} against the real target before use`,
+      );
+      const hc = await this.runHealthCheck(checkTarget.id, this.selfHealTarget);
+      if (!hc.ok) {
+        throw new Error(
+          `proxy route unhealthy (fail-closed): ${hc.error ?? "health check failed"} (${checkTarget.config.name})`,
+        );
+      }
+      return await this.select(preferredNodeId);
+    }
   }
 
   stopTunnel(nodeId: string): Promise<void> {

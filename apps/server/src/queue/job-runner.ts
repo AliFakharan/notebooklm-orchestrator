@@ -127,9 +127,12 @@ export class JobRunner {
         let handle: TunnelHandle | null = null;
         let nodeId: string | null = null;
         try {
-          // select() validates (config + fresh healthy check) AND starts the
-          // tunnel; it throws when no node can provide a real route.
-          const sel = await this.d.proxyManager.select(
+          // selectAuto() validates (config + fresh healthy check) AND starts
+          // the tunnel; it throws when no node can provide a real route.
+          // When health is merely STALE (10-min TTL passed), it runs the real
+          // staged check against the NotebookLM target first (self-heal), so
+          // a previously-verified node keeps working without manual clicks.
+          const sel = await this.d.proxyManager.selectAuto(
             this.d.jobs.getOrThrow(jobId).input.preferredNodeId,
           );
           nodeId = sel.node.id;
