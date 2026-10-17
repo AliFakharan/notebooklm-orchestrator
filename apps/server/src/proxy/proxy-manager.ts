@@ -153,12 +153,22 @@ export class ProxyManager {
     );
   }
 
+  /** Max candidates to re-check during self-heal. Each check takes a few
+   *  seconds (up to ~15s on tunnel timeout); 12 caps worst-case self-heal
+   *  latency while still surviving a cluster of dead top-priority nodes in
+   *  a large pool. */
+  private static readonly SELF_HEAL_MAX_CANDIDATES = 12;
+
   /**
    * Select with self-healing: when no node has a FRESH healthy check, run the
    * real staged health check against the actual NotebookLM target (SSRF-
    * guarded, allowlisted, evidence persisted) and retry selection. This is
    * what makes jobs and auth flows work after the 10-minute health TTL
    * passes, without asking the user to click "health check" first.
+   *
+   * Candidates are re-checked in priority order (preferred node first when
+   * given) until one passes; a dead top-priority node must not block a job
+   * when a lower-priority node is alive.
    *
    * Still fail-closed: the check is real (CONNECT + TLS + HTTP through the
    * tunnel), and a failed check is a failed route — never a direct fallback.
@@ -175,23 +185,32 @@ export class ProxyManager {
       const enabled = this.repo.list().filter((n) => n.enabled);
       if (enabled.length === 0) throw err;
 
-      // Re-check the best candidate: the preferred node when given, else the
-      // top-priority enabled one. The target is the real service, so a pass
-      // proves NotebookLM reachability from that egress, not generic DNS.
       const byId = new Map(enabled.map((n) => [n.id, n]));
-      const checkTarget =
-        (preferredNodeId && byId.get(preferredNodeId)) ||
-        [...enabled].sort((a, b) => a.priority - b.priority)[0]!;
-      this.log(
-        `no fresh proxy health — running staged check on ${checkTarget.config.name} against the real target before use`,
-      );
-      const hc = await this.runHealthCheck(checkTarget.id, this.selfHealTarget);
-      if (!hc.ok) {
+      const preferred = preferredNodeId ? (byId.get(preferredNodeId) ?? null) : null;
+      const candidates = [
+        ...(preferred ? [preferred] : []),
+        ...[...enabled].sort((a, b) => a.priority - b.priority).filter((n) => n !== preferred),
+      ].slice(0, ProxyManager.SELF_HEAL_MAX_CANDIDATES);
+
+      const failures: { name: string; error: string | null }[] = [];
+      for (const cand of candidates) {
+        this.log(
+          `no fresh proxy health — running staged check on ${cand.config.name} against the real target before use`,
+        );
+        const hc = await this.runHealthCheck(cand.id, this.selfHealTarget);
+        if (hc.ok) break; // fresh ok health — selection can now succeed
+        failures.push({ name: cand.config.name, error: hc.error ?? "health check failed" });
+      }
+
+      try {
+        return await this.select(preferredNodeId);
+      } catch {
         throw new Error(
-          `proxy route unhealthy (fail-closed): ${hc.error ?? "health check failed"} (${checkTarget.config.name})`,
+          `proxy route unhealthy (fail-closed): ${failures
+            .map((f) => `${f.name}: ${f.error}`)
+            .join(" | ")}`,
         );
       }
-      return await this.select(preferredNodeId);
     }
   }
 

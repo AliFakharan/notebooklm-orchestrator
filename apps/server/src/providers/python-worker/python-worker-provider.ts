@@ -243,14 +243,17 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       pythonBin: this.opts.pythonBin,
       workerPath: this.opts.workerPath,
       env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
-      requestTimeoutMs: 90_000,
+      // Through a residential proxy the round-trip to Google can be slow;
+      // give verification generous headroom (5 min supervisor / 2 min per
+      // inner request) rather than killing a healthy session check.
+      requestTimeoutMs: 300_000,
       log: this.log,
     });
     try {
       await w.start();
       const r = await w.request<{ email: string; notebooks: number; checkedAt: string }>("verify", {
         sessionPath,
-        timeoutSec: 60,
+        timeoutSec: 120,
       });
       return {
         ok: true,
