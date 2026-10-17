@@ -117,6 +117,18 @@ export class ProxyManager {
         : false;
       if (health && health.ok && fresh) {
         sawAnyFresh = true;
+        // A route that answers a single curl round-trip in >3s will hang the
+        // heavy NotebookLM client past its deadline. Skip it in favor of
+        // faster candidates — UNLESS it was explicitly preferred (self-heal
+        // made an informed slow-fallback decision and passes it here).
+        const latency = health.latencyMs ?? 0;
+        if (latency > ProxyManager.SELF_HEAL_MAX_LATENCY_MS && preferredNodeId !== node.id) {
+          rejected.push({
+            nodeId: node.id,
+            reason: `route too slow (${latency}ms > ${ProxyManager.SELF_HEAL_MAX_LATENCY_MS}ms)`,
+          });
+          continue;
+        }
       } else {
         const why = !health
           ? "never health-checked"
@@ -159,6 +171,13 @@ export class ProxyManager {
    *  a large pool. */
   private static readonly SELF_HEAL_MAX_CANDIDATES = 12;
 
+  /** A node whose single HTTP round-trip through the tunnel to Google takes
+   *  longer than this is too slow for the real (much heavier) NotebookLM
+   *  client, which would exceed its worker deadline. Treated as
+   *  "unusable-slow" during self-heal and checked against the next
+   *  candidate instead. */
+  private static readonly SELF_HEAL_MAX_LATENCY_MS = 3000;
+
   /**
    * Select with self-healing: when no node has a FRESH healthy check, run the
    * real staged health check against the actual NotebookLM target (SSRF-
@@ -193,17 +212,45 @@ export class ProxyManager {
       ].slice(0, ProxyManager.SELF_HEAL_MAX_CANDIDATES);
 
       const failures: { name: string; error: string | null }[] = [];
+      let chosen: { id: string; name: string } | null = null; // fast + healthy
+      let slowOk: { id: string; name: string; latencyMs: number }[] = [];
       for (const cand of candidates) {
         this.log(
           `no fresh proxy health — running staged check on ${cand.config.name} against the real target before use`,
         );
         const hc = await this.runHealthCheck(cand.id, this.selfHealTarget);
-        if (hc.ok) break; // fresh ok health — selection can now succeed
-        failures.push({ name: cand.config.name, error: hc.error ?? "health check failed" });
+        if (!hc.ok) {
+          failures.push({ name: cand.config.name, error: hc.error ?? "health check failed" });
+          continue;
+        }
+        const slow = hc.latencyMs !== null && hc.latencyMs > ProxyManager.SELF_HEAL_MAX_LATENCY_MS;
+        if (!slow) {
+          chosen = { id: cand.id, name: cand.config.name };
+          break;
+        }
+        // Responds, but too slow for the heavy NotebookLM client. Keep looking
+        // for a faster node; remember this one as a last resort.
+        slowOk.push({ id: cand.id, name: cand.config.name, latencyMs: hc.latencyMs ?? 0 });
+        failures.push({
+          name: cand.config.name,
+          error: `slow (${hc.latencyMs}ms > ${ProxyManager.SELF_HEAL_MAX_LATENCY_MS}ms)`,
+        });
       }
 
+      // A fast healthy node wins. Otherwise fall back to the fastest
+      // slow-but-responding node — a slow tunnel is still a tunnel, and
+      // fail-closed only means "no tunnel at all", never direct egress.
+      const pick =
+        chosen ?? (slowOk.length > 0 ? slowOk.sort((a, b) => a.latencyMs - b.latencyMs)[0] : null);
+      if (!pick) {
+        throw new Error(
+          `proxy route unhealthy (fail-closed): ${failures
+            .map((f) => `${f.name}: ${f.error}`)
+            .join(" | ")}`,
+        );
+      }
       try {
-        return await this.select(preferredNodeId);
+        return await this.select(pick.id);
       } catch {
         throw new Error(
           `proxy route unhealthy (fail-closed): ${failures

@@ -380,6 +380,13 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
             )
         notebook_id = getattr(nb, "notebook_id", None) or getattr(nb, "id", None)
 
+        # NOTE: notebooklm-py's Source model identifies a source via `.id`
+        # (older builds used `.source_id`), so every read falls back to `.id`.
+        # A missing id here would otherwise surface as "Source not found: None"
+        # from wait_until_ready.
+        def _src_id(s: Any) -> str | None:
+            return getattr(s, "source_id", None) or getattr(s, "id", None)
+
         # Idempotency anchor: reuse an existing source with the same title
         # instead of double-uploading on a safe retry.
         uploaded = True
@@ -393,9 +400,7 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
             source = None
         if source is not None:
             uploaded = False
-            await _progress(
-                "source_reused", sourceId=getattr(source, "source_id", None)
-            )
+            await _progress("source_reused", sourceId=_src_id(source))
         else:
             await _progress("uploading_audio")
             source = await client.sources.add_file(
@@ -403,9 +408,14 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
                 audio_path,
                 title=audio_name,
             )
-            await _progress("upload_done", sourceId=getattr(source, "source_id", None))
+            await _progress("upload_done", sourceId=_src_id(source))
 
-        source_id = getattr(source, "source_id", None)
+        source_id = _src_id(source)
+        if not source_id:
+            raise RuntimeError(
+                "audio upload reported success but returned no source id "
+                f"(source={type(source).__name__}); cannot wait for processing"
+            )
         await _progress("waiting_for_processing")
         await client.sources.wait_until_ready(notebook_id, source_id, timeout=wait_sec)
         await _progress("processing_done")
