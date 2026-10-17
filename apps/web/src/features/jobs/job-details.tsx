@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { Link, useParams } from "react-router-dom";
 import {
   Ban,
+  Check,
+  Copy,
   Download,
   FileAudio,
   ListOrdered,
@@ -232,6 +235,7 @@ export function JobDetailsPage() {
 /* --------------------------------- panels --------------------------------- */
 
 function AnswerPanel({ job }: { job: Job }) {
+  const [copied, setCopied] = useState(false);
   if (!job.answerMarkdown) {
     return (
       <Card>
@@ -243,22 +247,46 @@ function AnswerPanel({ job }: { job: Job }) {
     );
   }
   const prov = job.resultProvenance ?? "unknown";
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(job.answerMarkdown ?? "");
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable (e.g. insecure context) — ignore */
+    }
+  };
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-2">
           <CardTitle>پاسخ</CardTitle>
-          {prov === "real" && <Badge variant="success">منبع: سرویس واقعی</Badge>}
-          {prov === "mock" && <Badge variant="secondary">منبع: شبیه‌ساز (mock)</Badge>}
-          {prov === "unknown" && <Badge variant="warning">منبع: نامشخص</Badge>}
+          <div className="flex items-center gap-2">
+            {prov === "real" && <Badge variant="success">منبع: سرویس واقعی</Badge>}
+            {prov === "mock" && <Badge variant="secondary">منبع: شبیه‌ساز (mock)</Badge>}
+            {prov === "unknown" && <Badge variant="warning">منبع: نامشخص</Badge>}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              onClick={() => void copy()}
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5 text-success" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+              {copied ? "کپی شد" : "کپی پاسخ"}
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
-        {/* Markdown is rendered as plain text: no sanitization pipeline is
-            bundled, and echoing untrusted HTML would be an XSS risk. */}
-        <pre className="max-h-120 overflow-auto whitespace-pre-wrap rounded-field border-line border-border bg-field p-4 text-sm leading-8">
-          {job.answerMarkdown}
-        </pre>
+        {/* react-markdown compiles to React elements (no dangerouslySetInnerHTML),
+            so raw HTML in the answer cannot inject — XSS-safe by construction. */}
+        <div className="answer-md max-h-120 overflow-auto rounded-field border-line border-border bg-field p-4 text-sm leading-7">
+          <ReactMarkdown>{job.answerMarkdown}</ReactMarkdown>
+        </div>
         {job.resultProviderMeta && (
           <details className="mt-3 text-xs text-muted-foreground">
             <summary className="cursor-pointer hover:text-foreground">جزئیات ارائه‌دهنده</summary>
