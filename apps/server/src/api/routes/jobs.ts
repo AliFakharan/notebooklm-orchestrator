@@ -2,7 +2,7 @@ import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { ApiError, ApiCodes, resolveWithin, type JobInput } from "@nlo/shared";
+import { ApiError, ApiCodes, resolveWithin, safeName, type JobInput } from "@nlo/shared";
 import type { AppContext } from "../../app-context.js";
 import { JobArchive } from "../../domain/archive.js";
 import { dataPaths } from "../../config.js";
@@ -224,6 +224,78 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
       return reply.send(createReadStream(file));
     },
   );
+
+  // Stream the job's INPUT audio back to the web player. The file is
+  // server-stored at data/jobs/<id>/input/audio-<safeName> and the path is
+  // re-derived from the job's own recorded metadata (resolveWithin keeps it
+  // inside the job dir), so no client-controlled path component exists.
+  app.get<{ Params: { id: string } }>("/api/jobs/:id/audio", async (req, reply) => {
+    const job = ctx.jobs.get(req.params.id);
+    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+    const { originalName, size, mediaType } = job.input.audio;
+    if (size <= 0) {
+      throw new ApiError(ApiCodes.notFound, "no input audio recorded for this job", 404);
+    }
+    let safe: string;
+    try {
+      safe = safeName(originalName);
+    } catch {
+      throw new ApiError(ApiCodes.notFound, "no input audio recorded for this job", 404);
+    }
+    const file = resolveWithin(
+      dataPaths(ctx.config.dataDir).jobsDir,
+      job.id,
+      "input",
+      `audio-${safe}`,
+    );
+    const { createReadStream, statSync } = await import("node:fs");
+    let stat;
+    try {
+      stat = statSync(file);
+    } catch {
+      throw new ApiError(ApiCodes.notFound, "input audio file missing", 404);
+    }
+    reply.header("content-type", mediaType);
+    reply.header("content-length", stat.size);
+    reply.header("content-disposition", `inline; filename="${encodeURIComponent(originalName)}"`);
+    return reply.send(createReadStream(file));
+  });
+
+  // Download variant of the input audio (attachment disposition).
+  app.get<{ Params: { id: string } }>("/api/jobs/:id/audio/download", async (req, reply) => {
+    const job = ctx.jobs.get(req.params.id);
+    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+    const { originalName, size, mediaType } = job.input.audio;
+    if (size <= 0) {
+      throw new ApiError(ApiCodes.notFound, "no input audio recorded for this job", 404);
+    }
+    let safe: string;
+    try {
+      safe = safeName(originalName);
+    } catch {
+      throw new ApiError(ApiCodes.notFound, "no input audio recorded for this job", 404);
+    }
+    const file = resolveWithin(
+      dataPaths(ctx.config.dataDir).jobsDir,
+      job.id,
+      "input",
+      `audio-${safe}`,
+    );
+    const { createReadStream, statSync } = await import("node:fs");
+    let stat;
+    try {
+      stat = statSync(file);
+    } catch {
+      throw new ApiError(ApiCodes.notFound, "input audio file missing", 404);
+    }
+    reply.header("content-type", mediaType);
+    reply.header("content-length", stat.size);
+    reply.header(
+      "content-disposition",
+      `attachment; filename="${encodeURIComponent(originalName)}"`,
+    );
+    return reply.send(createReadStream(file));
+  });
 
   app.post<{ Params: { id: string } }>("/api/jobs/:id/cancel", async (req) => {
     const job = ctx.jobs.get(req.params.id);

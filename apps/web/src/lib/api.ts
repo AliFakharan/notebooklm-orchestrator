@@ -52,6 +52,73 @@ export function getAdminToken(): string | null {
   return adminToken;
 }
 
+async function errorFrom(res: Response): Promise<ApiClientError | null> {
+  try {
+    const ct = res.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) return null;
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    if (body?.error) {
+      return new ApiClientError(
+        res.status,
+        body.error.code ?? "unknown",
+        body.error.message ?? "خطای ناشناخته",
+      );
+    }
+  } catch {
+    /* non-JSON body — fall through */
+  }
+  return null;
+}
+
+/**
+ * Fetch a job's input audio (the server re-derives the stored path from the
+ * job's own metadata — no client path input) and return it as a Blob URL.
+ * The auth header goes on the fetch; the Blob URL then needs no credentials
+ * for <audio> or a download anchor.
+ */
+export async function jobAudioBlobUrl(jobId: string): Promise<{ url: string; type: string }> {
+  let res: Response;
+  try {
+    const headers: Record<string, string> = {};
+    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
+    res = await fetch(`/api/jobs/${jobId}/audio`, { headers });
+  } catch {
+    throw new NetworkError();
+  }
+  if (!res.ok) {
+    const err = await errorFrom(res);
+    throw err ?? new ApiClientError(res.status, "unknown", "دریافت صدا ناموفق بود.");
+  }
+  const blob = await res.blob();
+  return { url: URL.createObjectURL(blob), type: res.headers.get("content-type") ?? blob.type };
+}
+
+/** Download a job's input audio (triggers a browser save dialog). */
+export async function downloadJobAudio(jobId: string): Promise<void> {
+  let res: Response;
+  try {
+    const headers: Record<string, string> = {};
+    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
+    res = await fetch(`/api/jobs/${jobId}/audio/download`, { headers });
+  } catch {
+    throw new NetworkError();
+  }
+  if (!res.ok) {
+    const err = await errorFrom(res);
+    throw err ?? new ApiClientError(res.status, "unknown", "دانلود صدا ناموفق بود.");
+  }
+  const cd = res.headers.get("content-disposition") ?? "";
+  const m = cd.match(/filename="([^"]*)"/);
+  const filename = m && m[1] ? decodeURIComponent(m[1]) : `audio-${jobId.slice(0, 8)}`;
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function parseBody(res: Response): Promise<unknown> {
   if (res.status === 204) return null;
   const ct = res.headers.get("content-type") ?? "";

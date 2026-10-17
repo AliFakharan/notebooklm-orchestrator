@@ -16,8 +16,10 @@ import {
 import type { Artifact, Job, JobEvent } from "@nlo/shared";
 import {
   artifactDownload,
+  downloadJobAudio,
   jobAttempts,
   jobArtifacts,
+  jobAudioBlobUrl,
   jobCancel,
   jobEvents,
   jobGet,
@@ -169,6 +171,7 @@ export function JobDetailsPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <Progress value={job.progress} label="پیشرفت" showValue size="sm" />
+          {job.input.audio.size > 0 && <InputAudio jobId={job.id} job={job} />}
           {job.progressNote && <p className="text-xs text-muted-foreground">{job.progressNote}</p>}
           {job.status === "FAILED" && job.errorMessage && (
             <p
@@ -228,6 +231,77 @@ export function JobDetailsPage() {
           بازگشت به فهرست درخواست‌ها
         </Link>
       </p>
+    </div>
+  );
+}
+
+/* ---------------------------- input audio player ---------------------------- */
+
+/**
+ * Plexer + downloader for the audio the job was created with. The blob is
+ * fetched once on mount (auth header included) and revoked on unmount.
+ */
+function InputAudio({ jobId, job }: { jobId: string; job: Job }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const { audio } = job.input;
+
+  useEffect(() => {
+    let alive = true;
+    let url: string | null = null;
+    void (async () => {
+      try {
+        const { url: u } = await jobAudioBlobUrl(jobId);
+        if (!alive) {
+          URL.revokeObjectURL(u);
+          return;
+        }
+        url = u;
+        setSrc(u);
+      } catch {
+        if (alive) setFailed(true);
+      }
+    })();
+    return () => {
+      alive = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [jobId]);
+
+  const doDownload = async () => {
+    setBusy(true);
+    try {
+      await downloadJobAudio(jobId);
+    } catch {
+      /* a failed save dialog is not worth a toast here */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-field border-line border-border bg-field p-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 text-sm font-medium">
+          <FileAudio className="h-4 w-4 text-muted-foreground" />
+          فایل صوتی ورودی
+        </span>
+        <span className="text-xs text-muted-foreground" dir="ltr">
+          {audio.originalName} · {faFileSize(audio.size)}
+        </span>
+      </div>
+      {src && <audio controls src={src} className="w-full" />}
+      {failed && <p className="text-xs text-muted-foreground">دریافت صدا برای پخش ممکن نشد.</p>}
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={busy || failed}
+        onClick={() => void doDownload()}
+      >
+        <Download className="h-3.5 w-3.5" />
+        {busy ? "در حال آماده‌سازی…" : "دانلود فایل صوتی"}
+      </Button>
     </div>
   );
 }
