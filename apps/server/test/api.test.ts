@@ -118,6 +118,102 @@ describe("accounts", () => {
     expect(gone.statusCode).toBe(404);
   });
 
+  it("supports a single default account with an exclusive invariant", async () => {
+    const a = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { label: "def-a" },
+      })
+    ).json();
+    const b = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { label: "def-b" },
+      })
+    ).json();
+
+    const setA = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${a.id}/default`,
+      headers: auth,
+      payload: { isDefault: true },
+    });
+    expect(setA.statusCode).toBe(200);
+    expect(setA.json().isDefault).toBe(true);
+
+    // Setting a second default clears the first.
+    const setB = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${b.id}/default`,
+      headers: auth,
+      payload: { isDefault: true },
+    });
+    expect(setB.json().isDefault).toBe(true);
+    const list = await app.inject({ method: "GET", url: "/api/accounts", headers: auth });
+    const rowA = list.json().find((x: { id: string }) => x.id === a.id);
+    const rowB = list.json().find((x: { id: string }) => x.id === b.id);
+    expect(rowA.isDefault).toBe(false);
+    expect(rowB.isDefault).toBe(true);
+
+    // Clearing works.
+    const clear = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${b.id}/default`,
+      headers: auth,
+      payload: { isDefault: false },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(clear.json().isDefault).toBe(false);
+
+    // Validation: bad body rejected.
+    const bad = await app.inject({
+      method: "POST",
+      url: `/api/accounts/${b.id}/default`,
+      headers: auth,
+      payload: { isDefault: "yes" },
+    });
+    expect(bad.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it("rejects browser-import for disallowed browsers and unknown accounts", async () => {
+    const created = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { label: "bi-1" },
+      })
+    ).json();
+
+    // Disallowlist: the client must never pick an arbitrary executable.
+    for (const browser of ["/usr/bin/google-chrome", "iexplore", "chrome; rm -rf /"]) {
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/sessions/${created.id}/browser-import`,
+        headers: auth,
+        payload: { browser },
+      });
+      expect(res.statusCode, browser).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode, browser).toBeLessThan(500);
+    }
+
+    // Unknown account: in mock mode the provider guard (400) fires first
+    // (fail-closed); with the python-worker it is a clean 404. Either way:
+    // a client error, never 500.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/acc_missing/browser-import",
+      headers: auth,
+      payload: { browser: "chrome" },
+    });
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+    expect(res.statusCode).toBeLessThan(500);
+  });
+
   it("rejects duplicate labels with a conflict-free envelope (no raw error leak)", async () => {
     await app.inject({
       method: "POST",

@@ -1,7 +1,7 @@
 import { createServer, Socket, type Server } from "node:net";
 import { AddressInfo } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ProxyNode } from "@nlo/shared";
 

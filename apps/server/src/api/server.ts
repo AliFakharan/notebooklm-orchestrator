@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import { toApiErrorBody, ApiError, ApiCodes, redactDeep } from "@nlo/shared";
+import { ZodError } from "zod";
 import type { AppContext } from "../app-context.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerJobRoutes } from "./routes/jobs.js";
@@ -82,6 +83,16 @@ export async function buildApp(
   }
   app.setErrorHandler((errRaw: unknown, _req, reply) => {
     const err = errRaw as FastifyErr;
+    // Body-payload validation done via zod in the route handlers.
+    if (errRaw instanceof ZodError) {
+      return reply.code(400).send({
+        error: {
+          code: ApiCodes.validation,
+          message: "request validation failed",
+          details: redactDeep(errRaw.issues.map((i) => i.message)),
+        },
+      });
+    }
     if (errRaw instanceof ApiError) {
       return reply.code(errRaw.httpStatus).send({
         error: {

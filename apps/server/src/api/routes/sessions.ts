@@ -38,6 +38,43 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     return worker;
   };
 
+  // One auth operation at a time per account: concurrent login/import would
+  // race on the same 0600 session file. The state (AUTH_IN_PROGRESS) plus
+  // this in-memory set give the UI a reliable "still running" signal.
+  const inFlight = new Set<string>();
+  const enterAuth = (accountId: string): void => {
+    if (inFlight.has(accountId)) {
+      throw new ApiError(ApiCodes.conflict, "an authentication operation is already running", 409);
+    }
+    inFlight.add(accountId);
+  };
+  const leaveAuth = (accountId: string): void => {
+    inFlight.delete(accountId);
+  };
+
+  /** Keep the account row's visible identity in sync with the verified one. */
+  function syncAccountIdentity(accountId: string, email: string | null): void {
+    const acct = ctx.accounts.get(accountId);
+    if (!acct || !email) return;
+    if (acct.displayEmail !== email) {
+      ctx.accounts.update(accountId, { displayEmail: email });
+    }
+    ctx.accounts.update(accountId, { lastVerifiedAt: new Date().toISOString() });
+  }
+
+  /**
+   * Enforce "never associate a session with the wrong account": when the
+   * account row carries an expected email and the service-verified identity
+   * differs, the session is rejected as SESSION_INVALID with a clear error.
+   * Returns the mismatch message, or null when there is no mismatch.
+   */
+  function mismatchFor(accountId: string, verifiedEmail: string | null): string | null {
+    const acct = ctx.accounts.get(accountId);
+    if (!acct || !acct.displayEmail || !verifiedEmail) return null;
+    if (acct.displayEmail.trim().toLowerCase() === verifiedEmail.trim().toLowerCase()) return null;
+    return `identity mismatch: session belongs to ${verifiedEmail}, but this account is for ${acct.displayEmail}`;
+  }
+
   function sessionView(accountId: string) {
     const acct = ctx.accounts.get(accountId);
     const session = ctx.sessions.get(accountId, PROVIDER);
@@ -70,7 +107,15 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
         email: status.email,
         verified: true,
       });
-      return { ok: true as const, email: status.email, detail: status.detail, session };
+      syncAccountIdentity(accountId, status.email);
+      const mismatch = mismatchFor(accountId, status.email);
+      return {
+        ok: true as const,
+        email: status.email,
+        detail: mismatch ? `verified, but: ${mismatch}` : status.detail,
+        mismatch: mismatch !== null,
+        session,
+      };
     }
     const session = ctx.sessions.transition(accountId, PROVIDER, "AUTH_REQUIRED", {
       lastError: status.detail ?? "session rejected by service",
@@ -79,6 +124,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       ok: false as const,
       email: null as string | null,
       detail: status.detail,
+      mismatch: false,
       session,
     };
   }
@@ -106,41 +152,154 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     browser: z.enum(["chromium", "chrome", "msedge"]).optional(),
   });
 
+  // Shared entry check for both live auth paths (login / browser-import).
+  const canEnterAuth = (accountId: string): void => {
+    ctx.sessions.ensure(
+      accountId,
+      PROVIDER,
+      ctx.accounts.getOrThrow(accountId).authProfile ?? "default",
+    );
+    const cur = ctx.sessions.get(accountId, PROVIDER)!;
+    if (cur.state === "AUTH_IN_PROGRESS") {
+      if (inFlight.has(accountId)) {
+        throw new ApiError(
+          ApiCodes.conflict,
+          "authentication is already running for this account",
+          409,
+        );
+      }
+      // Stale AUTH_IN_PROGRESS (server restarted mid-login) — recoverable.
+    } else if (
+      ![
+        "AUTH_REQUIRED",
+        "CONFIGURED",
+        "UNKNOWN",
+        "SESSION_EXPIRED",
+        "SESSION_INVALID",
+        "ACCESS_UNAVAILABLE",
+      ].includes(cur.state)
+    ) {
+      throw new ApiError(ApiCodes.validation, `cannot start auth from state ${cur.state}`, 409);
+    }
+    enterAuth(accountId);
+    ctx.sessions.transition(accountId, PROVIDER, "AUTH_IN_PROGRESS", {});
+  };
+
   app.post<{ Params: { id: string } }>("/api/sessions/:id/login", async (req) => {
     const w = requireWorker();
-    const acct = ctx.accounts.getOrThrow(req.params.id);
+    const acct = ctx.accounts.get(req.params.id);
+    if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
     const body = loginBody.parse(req.body ?? {});
-    ctx.sessions.ensure(acct.id, PROVIDER, acct.authProfile ?? "default");
-    const cur = ctx.sessions.get(acct.id, PROVIDER)!;
-    const canEnter = [
-      "AUTH_REQUIRED",
-      "CONFIGURED",
-      "UNKNOWN",
-      "SESSION_EXPIRED",
-      "SESSION_INVALID",
-      "ACCESS_UNAVAILABLE",
-    ].includes(cur.state);
-    if (!canEnter) {
-      throw new ApiError(ApiCodes.validation, `cannot start login from state ${cur.state}`, 409);
-    }
-    ctx.sessions.transition(acct.id, PROVIDER, "AUTH_IN_PROGRESS", {});
+    canEnterAuth(acct.id);
     try {
       const r = await w.login(acct.id, {
         timeoutSec: body.timeoutSec ?? 600,
         headless: body.headless ?? false,
         browser: body.browser,
       });
+      const mismatch = mismatchFor(acct.id, r.email);
+      if (mismatch) {
+        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", { lastError: mismatch });
+        throw new ApiError(ApiCodes.conflict, mismatch, 409);
+      }
       const s = ctx.sessions.transition(acct.id, PROVIDER, "AUTHENTICATED", {
         email: r.email,
         verified: true,
       });
+      syncAccountIdentity(acct.id, r.email);
       return { session: s, email: r.email };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.sessions.transition(acct.id, PROVIDER, "AUTH_REQUIRED", {
-        lastError: msg.slice(0, 500),
-      });
+      const cur = ctx.sessions.get(acct.id, PROVIDER);
+      if (cur && cur.state === "AUTH_IN_PROGRESS") {
+        ctx.sessions.transition(acct.id, PROVIDER, "AUTH_REQUIRED", {
+          lastError: msg.slice(0, 500),
+        });
+      }
       throw new ApiError(ApiCodes.unauthorized, `login failed: ${msg.slice(0, 300)}`, 401);
+    } finally {
+      leaveAuth(acct.id);
+    }
+  });
+
+  // --- import cookies from an installed, non-automated browser --------------
+  // Google's bot detection rejects sign-in inside the fresh Playwright
+  // browser this app launches ("This browser or app may not be secure").
+  // This route is the supported alternative: the user signs in with their
+  // normal Chrome/Firefox once, and the app copies that session locally via
+  // the installed notebooklm-py CLI, then verifies it against the REAL
+  // service. Browser selection is an allowlist — the client never chooses an
+  // executable or a path. NOTE: the cookie JAR read itself does not traverse
+  // our tunnel (it is a local disk read); the CLI's verification step and all
+  // later NotebookLM requests do.
+  const BROWSER_COOKIE_OPTIONS: readonly string[] = [
+    "auto",
+    "chrome",
+    "firefox",
+    "chromium",
+    "brave",
+    "edge",
+    "opera",
+    "vivaldi",
+    "librewolf",
+    "zen",
+    "cachy",
+  ];
+
+  const browserImportBody = z.object({
+    /** Allowlisted browser name; Chromium profiles via "chrome::Profile 1". */
+    browser: z
+      .string()
+      .min(1)
+      .max(80)
+      .refine((b) => BROWSER_COOKIE_OPTIONS.includes(b.split("::", 1)[0]!.trim().toLowerCase()), {
+        message: "browser is not an allowed cookie source",
+      }),
+    /** Pick a signed-in Google account by email (multiple accounts). */
+    account: z.string().min(3).max(200).optional(),
+    timeoutSec: z.number().int().min(30).max(600).optional(),
+  });
+
+  app.post<{ Params: { id: string } }>("/api/sessions/:id/browser-import", async (req) => {
+    const w = requireWorker();
+    const acct = ctx.accounts.get(req.params.id);
+    if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
+    const body = browserImportBody.parse(req.body ?? {});
+    canEnterAuth(acct.id);
+    try {
+      const r = await w.browserImport(acct.id, {
+        browser: body.browser,
+        account: body.account,
+        timeoutSec: body.timeoutSec ?? 180,
+      });
+      const mismatch = mismatchFor(acct.id, r.email);
+      if (mismatch) {
+        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", { lastError: mismatch });
+        throw new ApiError(ApiCodes.conflict, mismatch, 409);
+      }
+      const s = ctx.sessions.transition(acct.id, PROVIDER, "AUTHENTICATED", {
+        email: r.email,
+        verified: true,
+      });
+      syncAccountIdentity(acct.id, r.email);
+      return {
+        session: s,
+        email: r.email,
+        routingNote:
+          "cookie jar read from your local browser (direct); the session verification and all NotebookLM requests use the configured tunnel",
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const cur = ctx.sessions.get(acct.id, PROVIDER);
+      if (cur && cur.state === "AUTH_IN_PROGRESS") {
+        ctx.sessions.transition(acct.id, PROVIDER, "AUTH_REQUIRED", {
+          lastError: msg.slice(0, 500),
+        });
+      }
+      if (err instanceof ApiError && err.httpStatus === 409) throw err;
+      throw new ApiError(ApiCodes.unauthorized, `browser import failed: ${msg.slice(0, 300)}`, 401);
+    } finally {
+      leaveAuth(acct.id);
     }
   });
 

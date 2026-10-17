@@ -1,11 +1,5 @@
 import { lookup } from "node:dns/promises";
-import {
-  assertAllowedDestination,
-  parseAllowEntry,
-  type AllowEntry,
-  type HealthCategory,
-  type ProxyNode,
-} from "@nlo/shared";
+import { parseAllowEntry, type AllowEntry, type HealthCategory, type ProxyNode } from "@nlo/shared";
 import type { ProxiesRepo } from "../domain/proxies.repo.js";
 import { ProxyRuntimeError, type ProxyRuntime, type TunnelHandle } from "./runtime.js";
 import type { SecretVault } from "../secrets/vault.js";

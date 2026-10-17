@@ -45,7 +45,7 @@ const TRANSITIONS: Record<AuthSessionState, AuthSessionState[]> = {
   ],
   SESSION_EXPIRED: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],
   SESSION_INVALID: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],
-  ACCESS_UNAVAILABLE: ["AUTHENTICATED", "AUTH_REQUIRED", "DISABLED"],
+  ACCESS_UNAVAILABLE: ["AUTHENTICATED", "AUTH_IN_PROGRESS", "AUTH_REQUIRED", "DISABLED"],
   DISABLED: ["CONFIGURED", "AUTH_REQUIRED"],
 };
 
@@ -89,14 +89,6 @@ export class AuthSessionsRepo {
       .get(accountId, provider) as Record<string, unknown> | undefined;
     return row ? this.map(row) : null;
   }
-
-  byProfile(profile: string): AuthSession | null {
-    const row = this.db.raw
-      .prepare("SELECT * FROM auth_sessions WHERE profile = ?")
-      .get(profile) as Record<string, unknown> | undefined;
-    return row ? this.map(row) : null;
-  }
-
   list(): AuthSession[] {
     const rows = this.db.raw
       .prepare("SELECT * FROM auth_sessions ORDER BY account_id, provider")

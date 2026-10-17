@@ -212,6 +212,7 @@ export interface Account {
   quotaNote: string | null;
   createdAt: string;
   updatedAt: string;
+  isDefault: boolean;
 }
 
 export function accountsList(): Promise<Account[]> {
@@ -245,6 +246,10 @@ export interface AccountHealth {
 
 export function accountHealthCheck(id: string): Promise<AccountHealth> {
   return request(`/api/accounts/${id}/health`, { method: "POST" });
+}
+
+export function accountSetDefault(id: string, isDefault: boolean): Promise<Account> {
+  return request(`/api/accounts/${id}/default`, jsonInit("POST", { isDefault }));
 }
 
 /* --------------------------------- proxies --------------------------------- */
@@ -455,9 +460,46 @@ export function sessionGet(accountId: string): Promise<SessionAccountView> {
 /** Start interactive browser login (blocks until sign-in completes or times out). */
 export function sessionLogin(
   accountId: string,
-  opts: { timeoutSec?: number; headless?: boolean } = {},
+  opts: {
+    timeoutSec?: number;
+    headless?: boolean;
+    browser?: "chromium" | "chrome" | "msedge";
+  } = {},
 ): Promise<{ session: AuthSessionView; email: string | null }> {
   return request(`/api/sessions/${accountId}/login`, jsonInit("POST", opts));
+}
+
+/**
+ * Browsers the server allowlists as cookie sources for session import.
+ * Chromium-family profiles can be targeted with "name::Profile" (e.g.
+ * "chrome::Profile 1"); the base name must be in this list.
+ */
+export const BROWSER_COOKIE_OPTIONS = [
+  "auto",
+  "chrome",
+  "firefox",
+  "chromium",
+  "brave",
+  "edge",
+  "opera",
+  "vivaldi",
+  "librewolf",
+  "zen",
+  "cachy",
+] as const;
+
+/**
+ * Import Google cookies from an installed, non-automated browser. This is the
+ * supported path when Google rejects the app's automated Playwright browser
+ * ("may not be secure"): sign in with your normal browser, then let the app
+ * copy the session locally. The server verifies the result against the real
+ * service before reporting success.
+ */
+export function sessionBrowserImport(
+  accountId: string,
+  body: { browser: string; account?: string; timeoutSec?: number },
+): Promise<{ session: AuthSessionView; email: string | null; routingNote?: string }> {
+  return request(`/api/sessions/${accountId}/browser-import`, jsonInit("POST", body));
 }
 
 export interface SessionVerifyResult {
@@ -467,6 +509,8 @@ export interface SessionVerifyResult {
   session?: AuthSessionView;
   note?: string;
   needsLogin?: boolean;
+  /** True when the verified identity does not match this account's expected email. */
+  mismatch?: boolean;
 }
 
 export function sessionVerify(accountId: string): Promise<SessionVerifyResult> {

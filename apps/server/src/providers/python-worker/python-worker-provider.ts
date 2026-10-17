@@ -346,6 +346,55 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
   }
 
+  /**
+   * Import Google cookies from an installed, non-automated browser (Chrome,
+   * Firefox, …). This is the UI-friendly alternative to the Playwright login
+   * that Google's bot detection rejects: the user signs in with their normal
+   * browser once, and we copy the session locally through the installed
+   * notebooklm-py CLI. The resulting session is verified against the REAL
+   * service (through the tunnel) before this method returns.
+   *
+   * Routing honesty: the browser's cookie JAR is read from disk — the browser
+   * itself does NOT route through our tunnel for this operation. The CLI's
+   * verification step and all subsequent NotebookLM requests DO route through
+   * the tunnel (HTTPS_PROXY).
+   */
+  async browserImport(
+    accountId: string,
+    opts: {
+      browser: string;
+      account?: string;
+      timeoutSec?: number;
+    },
+  ): Promise<{ email: string | null }> {
+    const sessionPath = this.sessionPathFor(accountId);
+    const tunnel = await this.acquireAuthTunnel();
+    const w = new WorkerSupervisor({
+      pythonBin: this.opts.pythonBin,
+      workerPath: this.opts.workerPath,
+      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
+      requestTimeoutMs: (opts.timeoutSec ?? 180) * 1000 + 120_000,
+      log: this.log,
+    });
+    try {
+      await w.start();
+      const r = await w.request<{ email: string | null; notebooks: number }>("browser-import", {
+        sessionPath,
+        browser: opts.browser,
+        account: opts.account,
+        timeoutSec: opts.timeoutSec ?? 180,
+      });
+      try {
+        chmodSync(sessionPath, 0o600);
+      } catch {
+        /* best effort */
+      }
+      return { email: r.email ?? null };
+    } finally {
+      await w.close();
+    }
+  }
+
   async runJob(req: ProviderJobRequest): Promise<ProviderJobResult> {
     if (!req.tunnel && !this.opts.allowDirect) {
       throw new ProviderFailure({

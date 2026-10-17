@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { existsSync, unlinkSync } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import { ApiError, ApiCodes } from "@nlo/shared";
 import type { AppContext } from "../../app-context.js";
+import { PythonWorkerProvider } from "../../providers/python-worker/python-worker-provider.js";
 
 const createAccount = z.object({
   label: z.string().min(1).max(80),
@@ -45,9 +47,33 @@ export function registerAccountRoutes(app: FastifyInstance, ctx: AppContext): vo
     return sanitizeAccount(a);
   });
 
+  // Set/clear the default account (job-selection preference). At most one
+  // account may be default — the repo enforces the invariant atomically.
+  const defaultBody = z.object({ isDefault: z.boolean() });
+
+  app.post<{ Params: { id: string } }>("/api/accounts/:id/default", async (req) => {
+    const body = defaultBody.parse(req.body ?? {});
+    const a = ctx.accounts.setDefault(req.params.id, body.isDefault);
+    return sanitizeAccount(a);
+  });
+
   app.delete<{ Params: { id: string } }>("/api/accounts/:id", async (req, reply) => {
     const ok = ctx.accounts.delete(req.params.id);
     if (!ok) throw new ApiError(ApiCodes.notFound, "account not found", 404);
+    // Account removal must also handle its stored session safely: the
+    // auth_sessions row cascades at the DB level, but the 0600
+    // storage-state FILE on disk is removed explicitly here.
+    const w = ctx.provider instanceof PythonWorkerProvider ? ctx.provider : null;
+    if (w) {
+      const f = w.sessionPathFor(req.params.id);
+      if (existsSync(f)) {
+        try {
+          unlinkSync(f);
+        } catch {
+          /* best effort — the account row is already gone */
+        }
+      }
+    }
     return reply.code(204).send();
   });
 
@@ -80,6 +106,7 @@ function sanitizeAccount(a: {
   quotaNote: string | null;
   createdAt: string;
   updatedAt: string;
+  isDefault?: boolean;
 }) {
   const row = a as unknown as Record<string, unknown>;
   return {
@@ -94,5 +121,6 @@ function sanitizeAccount(a: {
     quotaNote: row.quotaNote,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    isDefault: Boolean(row.isDefault),
   };
 }

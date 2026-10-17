@@ -9,12 +9,7 @@ import { SecretVault } from "./secrets/vault.js";
 import { MockProvider } from "./providers/mock-provider.js";
 import { PythonWorkerProvider } from "./providers/python-worker/python-worker-provider.js";
 import type { NotebookLMProvider } from "./providers/types.js";
-import {
-  MockProxyRuntime,
-  XrayProxyRuntimeStub,
-  createXrayProxyRuntime,
-  type ProxyRuntime,
-} from "./proxy/runtime.js";
+import { MockProxyRuntime, createXrayProxyRuntime, type ProxyRuntime } from "./proxy/runtime.js";
 import { MockProviderEgress } from "./proxy/egress.js";
 import { ProxyManager } from "./proxy/proxy-manager.js";
 import { fetchThroughTunnel } from "./proxy/connect-proxy.js";
@@ -128,9 +123,14 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
         })
       : new MockProvider();
 
+  // The sessions gate applies to the REAL provider only: a verified
+  // auth-session row is the sole evidence of a usable credential there.
+  // The mock provider simulates accounts and has no session records, so
+  // offline mock flows keep their historical behavior.
   const runner = new JobRunner({
     jobs,
     accounts,
+    sessions: config.provider === "python-worker" ? sessions : undefined,
     proxies,
     provider,
     proxyManager,

@@ -16,6 +16,8 @@ export interface AccountRow {
   authProfile: string | null;
   /** Last time the account's session was verified live (mirror of auth_sessions). */
   lastVerifiedAt: string | null;
+  /** Job-selection preference: at most ONE account may be the default. */
+  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -137,6 +139,23 @@ export class AccountsRepo {
       .run(this.db.now(), this.db.now(), id);
   }
 
+  /**
+   * Set the default account. Pass isDefault=false to clear the flag.
+   * Enforces the "at most one default" invariant atomically.
+   */
+  setDefault(id: string, isDefault: boolean): AccountRow {
+    this.getOrThrow(id);
+    if (isDefault) {
+      this.db.raw
+        .prepare("UPDATE accounts SET is_default = 0, updated_at = ? WHERE is_default = 1")
+        .run(this.db.now());
+    }
+    this.db.raw
+      .prepare("UPDATE accounts SET is_default = ?, updated_at = ? WHERE id = ?")
+      .run(isDefault ? 1 : 0, this.db.now(), id);
+    return this.getOrThrow(id);
+  }
+
   recordError(id: string, error: string, status: AccountStatus): void {
     this.db.raw
       .prepare("UPDATE accounts SET last_error=?, status=?, updated_at=? WHERE id=?")
@@ -163,6 +182,7 @@ export class AccountsRepo {
       quotaNote: (row.quota_note as string | null) ?? null,
       authProfile: (row.auth_profile as string | null) ?? null,
       lastVerifiedAt: (row.last_verified_at as string | null) ?? null,
+      isDefault: Boolean(row.is_default),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };

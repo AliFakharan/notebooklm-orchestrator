@@ -174,9 +174,13 @@ export function CreateJobPage() {
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field
-                label="حساب ترجیحی"
+                label="حساب گوگل"
                 htmlFor="account"
-                hint={accounts.length === 0 ? "حسابی ثبت نشده است." : undefined}
+                hint={
+                  accounts.length === 0
+                    ? "حسابی ثبت نشده است."
+                    : "حساب انتخابی باید جلسه‌ی تأییدشده داشته باشد؛ در غیر این صورت کار به همان دلیل نامی‌شده شکست می‌خورد."
+                }
               >
                 <Select
                   id="account"
@@ -184,10 +188,16 @@ export function CreateJobPage() {
                   onChange={(e) => setAccountId(e.target.value)}
                   placeholder="خودکار"
                   options={[
-                    { value: "", label: "خودکار (به انتخاب سیستم)" },
+                    { value: "", label: "خودکار (پیش‌فرض، سپس تازه‌ترین)" },
                     ...accounts.map((a) => ({
                       value: a.id,
-                      label: `${a.label}${a.status !== "ACTIVE" ? " — " + a.status : ""}`,
+                      label:
+                        `${a.label}${a.isDefault ? " — پیش‌فرض" : ""}` +
+                        (a.enabled
+                          ? a.status !== "ACTIVE"
+                            ? ` — ${a.status}`
+                            : ""
+                          : " — غیرفعال"),
                     })),
                   ]}
                 />

@@ -58,6 +58,13 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     const preferredAccountId = fields.preferredAccountId || null;
     const preferredNodeId = fields.preferredNodeId || null;
 
+    // Reject an unknown account ID up front (clearer than a runner failure
+    // later); the runner re-checks eligibility + a live verified session.
+    if (preferredAccountId && !ctx.accounts.get(preferredAccountId)) {
+      if (tempAudioPath) await rm(tempAudioPath);
+      throw new ApiError(ApiCodes.notFound, "preferred account not found", 404);
+    }
+
     // Validate + hash the audio if present.
     let audioMeta: JobInput["audio"] = {
       originalName: "",

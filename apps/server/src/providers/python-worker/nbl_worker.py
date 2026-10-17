@@ -246,6 +246,109 @@ async def op_login(p: dict[str, Any]) -> dict[str, Any]:
     return {"email": verified.get("email")}
 
 
+# Browsers the UI may select for cookie import. This is an allowlist of
+# names the installed notebooklm-py CLI understands for --browser-cookies;
+# the value is never executed — it is one argument to the CLI. Chromium-
+# family profiles use the documented "name::Profile" selector syntax.
+BROWSER_COOKIE_NAMES = frozenset(
+    {
+        "auto",
+        "chrome",
+        "firefox",
+        "chromium",
+        "brave",
+        "edge",
+        "opera",
+        "vivaldi",
+        "librewolf",
+        "zen",
+        "cachy",
+    }
+)
+
+
+def _validate_browser_spec(browser: str) -> str:
+    base = browser.split("::", 1)[0].strip().lower()
+    if base not in BROWSER_COOKIE_NAMES:
+        raise ValueError(
+            f"browser not allowed for cookie import: {browser!r} "
+            f"(allowed: {', '.join(sorted(BROWSER_COOKIE_NAMES))})"
+        )
+    if len(browser) > 80:
+        raise ValueError("browser spec too long")
+    return browser
+
+
+async def op_browser_import(p: dict[str, Any]) -> dict[str, Any]:
+    """Import Google cookies from an installed, non-automated browser.
+
+    This bypasses the Playwright-driven sign-in that Google's bot detection
+    rejects ("browser or app may not be secure") by reading the cookie jar of
+    the user's REAL browser via the installed notebooklm-py CLI
+    (`notebooklm login --browser-cookies`), writing the session straight to
+    our 0600 storage-state path. The CLI's built-in verification step runs
+    through the tunnel (HTTPS_PROXY env), and we re-verify against the real
+    service ourselves before reporting success.
+    """
+    session = Path(p["sessionPath"])
+    browser = _validate_browser_spec(str(p.get("browser", "chrome")))
+    account = p.get("account") or None
+    timeout = int(p.get("timeoutSec", 180))
+
+    argv = [
+        sys.executable,
+        "-m",
+        "notebooklm",
+        "login",
+        "--storage",
+        str(session),
+        "--browser-cookies",
+        browser,
+    ]
+    if account:
+        argv += ["--account", str(account)[:200]]
+
+    # The CLI must not see any NOTEBOOKLM_* auth env vars (the env-var auth
+    # fast path would bypass the cookie import and we would misattribute a
+    # session). Proxy vars are kept so the CLI's verification step routes
+    # through the tunnel exactly like every other service call.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NOTEBOOKLM_")}
+
+    await emit(
+        {"event": "log", "op": None, "data": {"stage": "importing_browser_cookies"}}
+    )
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            ),
+            timeout=timeout,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except (asyncio.TimeoutError, TimeoutError):
+        raise RuntimeError(f"browser cookie import timed out after {timeout}s")
+
+    tail = ((out + b"\n" + err).decode("utf-8", "replace")).strip()[-1500:]
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"browser cookie import failed (exit {proc.returncode}): {tail}"
+        )
+    if not session.exists():
+        raise RuntimeError(
+            f"browser cookie import reported success but wrote no session: {tail}"
+        )
+
+    os.chmod(session, 0o600)
+
+    # Never trust the exit code: verify against the REAL service.
+    await emit({"event": "log", "op": None, "data": {"stage": "verifying_session"}})
+    verified = await op_verify({"sessionPath": str(session), "timeoutSec": 60})
+    return {"email": verified.get("email"), "notebooks": verified.get("notebooks")}
+
+
 async def op_job(p: dict[str, Any]) -> dict[str, Any]:
     session = Path(p["sessionPath"])
     audio_path = Path(p["audioPath"])
@@ -341,6 +444,7 @@ OPS = {
     "validate": op_validate,
     "verify": op_verify,
     "login": op_login,
+    "browser-import": op_browser_import,
     "job": op_job,
 }
 

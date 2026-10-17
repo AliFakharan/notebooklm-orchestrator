@@ -4,6 +4,7 @@ import { backoffMs, classifyError, isRetryableError, safeName, resolveWithin } f
 import type { Job, FailureClass } from "@nlo/shared";
 import type { JobsRepo } from "../domain/jobs.repo.js";
 import type { AccountRow, AccountsRepo } from "../domain/accounts.repo.js";
+import type { AuthSessionsRepo } from "../domain/auth-sessions.repo.js";
 import type { ProxiesRepo } from "../domain/proxies.repo.js";
 import { JobArchive } from "../domain/archive.js";
 import { ProviderFailure, type NotebookLMProvider } from "../providers/types.js";
@@ -34,6 +35,11 @@ import type { ProviderEgress } from "../proxy/egress.js";
 export interface JobRunnerDeps {
   jobs: JobsRepo;
   accounts: AccountsRepo;
+  /** Real auth-session records (the ONLY evidence of a usable credential).
+   *  Optional for backward-compat with older test harnesses; when present,
+   *  account eligibility requires a live, verified session — never a plain
+   *  DB status flag. */
+  sessions?: AuthSessionsRepo;
   proxies: ProxiesRepo;
   provider: NotebookLMProvider;
   proxyManager: ProxyManager;
@@ -281,29 +287,60 @@ export class JobRunner {
     }
   }
 
+  /**
+   * Choose the account that will actually serve this job.
+   *
+   * Rules:
+   *  - A requested `preferredAccountId` is HONORED STRICTLY: if it exists but
+   *    is not currently eligible (e.g. its session is not verified), the job
+   *    fails with a clear auth error rather than silently switching to
+   *    another account — never reuse one account's session for another job.
+   *  - Otherwise the default account (when eligible) is preferred, then the
+   *    most-recently-successful eligible account (deterministic tie-break).
+   *  - Eligibility always means enabled + not DISABLED/AUTH_REQUIRED, and —
+   *    when the sessions repo is present — holding an AUTHENTICATED session
+   *    verified within the TTL. A DB flag alone is never sufficient.
+   */
   private selectAccount(job: Job): AccountRow {
-    let pool = this.d.accounts.eligible();
+    const eligibleIds = this.d.sessions?.eligibleAccountIds() ?? null;
+    const eligible = (a: AccountRow): boolean => {
+      if (!a.enabled || a.status === "DISABLED" || a.status === "AUTH_REQUIRED") {
+        return false;
+      }
+      if (eligibleIds !== null && !eligibleIds.has(a.id)) return false;
+      return true;
+    };
+
     if (job.input.preferredAccountId) {
       const preferred = this.d.accounts.get(job.input.preferredAccountId);
-      if (
-        preferred &&
-        preferred.enabled &&
-        preferred.status !== "DISABLED" &&
-        preferred.status !== "AUTH_REQUIRED"
-      ) {
-        pool = [preferred];
+      if (preferred && eligible(preferred)) {
+        return preferred;
       }
+      const why = !preferred
+        ? "not found"
+        : eligibleIds !== null && !eligibleIds.has(preferred.id)
+          ? "session not verified (re-authentication required)"
+          : "not enabled / disabled / auth-required";
+      this.d.jobs.setStatus(job.id, "FAILED", {
+        errorClass: "auth",
+        errorMessage: `requested account "${preferred?.label ?? job.input.preferredAccountId}" is not usable: ${why}`,
+      });
+      this.d.jobs.appendEvent(job.id, "no_account", `requested account not usable: ${why}`);
+      throw new Error(`requested account not usable: ${why}`);
     }
+
+    const pool = this.d.accounts.eligible().filter(eligible);
     if (pool.length === 0) {
       this.d.jobs.setStatus(job.id, "FAILED", {
         errorClass: "auth",
-        errorMessage: "no eligible google account configured",
+        errorMessage: "no eligible google account with a verified session",
       });
-      this.d.jobs.appendEvent(job.id, "no_account", "no eligible account");
-      throw new Error("no eligible google account configured");
+      this.d.jobs.appendEvent(job.id, "no_account", "no eligible account with verified session");
+      throw new Error("no eligible google account with a verified session");
     }
-    // Prefer the account with the most recent success (deterministic tie-break).
+
     const sorted = [...pool].sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
       const as = a.lastSuccessAt ?? "";
       const bs = b.lastSuccessAt ?? "";
       if (as !== bs) return as < bs ? 1 : -1;

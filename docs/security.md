@@ -65,6 +65,16 @@
 - timeout سخت + kill process group (`detached:true` + `process.kill(-pid)`).
 - stdout = JSON-lines؛ هر خط با zod validate می‌شود؛ خط غیرمعتبر = fail.
 - logهای worker قبل از ذخیره از همان redaction layer عبور می‌کنند (پترن cookie/UUID/password).
+- import کوکی از مرورگر واقعی (`POST /api/sessions/:id/browser-import`): مرورگر از یک **allowlist سرور** انتخاب می‌شود (فقط نام‌هایی که CLI notebooklm-py می‌شناسد؛ هرگز مسیر یا اجرایی دلخواه). صداقت مسیریابی: خواندن JAR کوکی یک خواندن دیسک محلی است (از تونل نمی‌گذرد)؛ اما مرحله‌ی تأییدِ CLI و تمام درخواست‌های بعدی به NotebookLM از تونل عبور می‌کنند. جلسه‌ی واردشده پیش از گزارش موفقیت در برابر سرویس واقعی verify می‌شود.
+
+## ۷b. احراز هویت چندحسابی
+
+- **ربط هویت (identity binding):** اگر سطر حساب دارای ایمیل مورد انتظار (`display_email`) باشد و هویت تأییدشده توسط سرویس متفاوت باشد، جلسه به `SESSION_INVALID` می‌رسد (identity mismatch) — هرگز جلسه را با حساب اشتباه جفت نمی‌کنیم.
+- **حذف حساب، فایل جلسه را هم حذف می‌کند** (unlink صریح در route؛ سطر auth_sessions با CASCADE پاک می‌شود).
+- **جلسه فقط با اعتبارسنجی زنده قابل استفاده است:** انتخاب حساب برای job نیازمند سطر auth_sessions در وضعیت AUTHENTICATED با `last_verified_at` تازه است؛ پرچم ساده در DB کافی نیست.
+- **حساب preferred در job سخت‌گیرانه محترم شمرده می‌شود:** اگر حساب درخواستی قابل استفاده نباشد، job با خطای auth می‌ماند (بدون جابه‌جایی پنهان به حساب دیگر).
+- **فقط یک حساب پیش‌فرض** (invariant اتمیک در `AccountsRepo.setDefault`).
+- خطاهای اعتبارسنجی body (zod) با `400 validation_error` پاسخ می‌دهند، هرگز ۵۰۰.
 
 ## ۸. Git hygiene
 
