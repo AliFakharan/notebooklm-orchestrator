@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   AudioLines,
@@ -12,11 +11,8 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useAuth } from "./auth-gate";
-import { providerInfo, type ProviderInfo } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sidebar, SidebarGroup, SidebarItem } from "@/components/ui/sidebar";
-import { Skeleton } from "@/components/ui/skeleton";
 
 const NAV = [
   { to: "/", label: "نمای کلی", icon: Gauge, end: true },
@@ -27,7 +23,6 @@ const NAV = [
 const INFRA = [
   { to: "/accounts", label: "حساب‌ها", icon: Boxes, end: false },
   { to: "/proxies", label: "پراکسی‌ها", icon: Cable, end: false },
-  { to: "/providers", label: "ارائه‌دهنده", icon: AudioLines, end: false },
 ];
 
 function NavLinkItem({
@@ -49,29 +44,12 @@ function NavLinkItem({
 }
 
 /**
- * Shared shell: the sidebar sits at the inline-start (right in RTL), the
- * main column shows the page content, and the header carries the provider
- * identity (mock providers are flagged honestly) plus sign-out.
+ * Shared shell: the sidebar sits at the inline-start (right in RTL) and the
+ * main column shows the page content.
  */
 export function AppLayout() {
   const { signOut, hasToken } = useAuth();
   const location = useLocation();
-  const [provider, setProvider] = useState<ProviderInfo | null>(null);
-  const [providerError, setProviderError] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    providerInfo()
-      .then((p) => {
-        if (!cancelled) setProvider(p);
-      })
-      .catch(() => {
-        if (!cancelled) setProviderError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   return (
     <div className="flex min-h-screen gap-4 p-4">
@@ -110,19 +88,6 @@ export function AppLayout() {
             <h1 className="truncate text-sm font-semibold" aria-live="polite">
               {navTitle(location.pathname)}
             </h1>
-            {provider ? (
-              <div className="hidden items-center gap-2 sm:flex">
-                <Badge variant={provider.isMock ? "brand" : "default"}>
-                  {provider.isMock ? "ارائه‌دهنده‌ی آزمایشی (mock)" : provider.name}
-                </Badge>
-                {provider.liveDisabled && <Badge variant="secondary">تست زنده: غیرفعال</Badge>}
-                {!provider.configured && <Badge variant="destructive">پیکربندی‌نشده</Badge>}
-              </div>
-            ) : providerError ? (
-              <Badge variant="secondary">وضعیت ارائه‌دهنده در دسترس نیست</Badge>
-            ) : (
-              <Skeleton className="h-4 w-32" />
-            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <NavLink to="/settings">
@@ -153,7 +118,6 @@ function navTitle(path: string): string {
   if (path === "/jobs") return "تاریخچه‌ی درخواست‌ها";
   if (path === "/accounts") return "حساب‌ها";
   if (path === "/proxies") return "پراکسی‌ها";
-  if (path === "/providers") return "ارائه‌دهنده";
   if (path === "/settings") return "تنظیمات";
   return "پنل مدیریت";
 }

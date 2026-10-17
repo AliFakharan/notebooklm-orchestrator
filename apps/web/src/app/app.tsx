@@ -8,7 +8,6 @@ import { JobHistoryPage } from "@/features/jobs/job-history";
 import { JobDetailsPage } from "@/features/jobs/job-details";
 import { AccountsPage } from "@/features/accounts/accounts";
 import { ProxiesPage } from "@/features/proxies/proxies";
-import { ProvidersPage } from "@/features/providers/providers";
 import { SettingsPage } from "@/features/settings/settings";
 
 /**
@@ -29,7 +28,6 @@ export function App() {
               <Route path="/jobs/:id" element={<JobDetailsPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/proxies" element={<ProxiesPage />} />
-              <Route path="/providers" element={<ProvidersPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
