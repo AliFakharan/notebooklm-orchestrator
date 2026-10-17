@@ -213,7 +213,7 @@ export class ProxyManager {
 
       const failures: { name: string; error: string | null }[] = [];
       let chosen: { id: string; name: string } | null = null; // fast + healthy
-      let slowOk: { id: string; name: string; latencyMs: number }[] = [];
+      const slowOk: { id: string; name: string; latencyMs: number }[] = [];
       for (const cand of candidates) {
         this.log(
           `no fresh proxy health — running staged check on ${cand.config.name} against the real target before use`,

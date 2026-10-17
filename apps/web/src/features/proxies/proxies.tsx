@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   Cable,
   CheckCircle2,
   Pencil,
@@ -19,12 +20,11 @@ import {
   proxyGet,
   proxyHealthCheck,
   proxyRuntimeStatus,
-  proxyUpdate,
   proxyValidate,
   proxiesList,
+  proxiesPingAll,
   type MaskedProxyNode,
   type ManualProxyInput,
-  type ProxyPatch,
   type ProxyRuntimeStatus,
 } from "@/lib/api";
 import { fa } from "@/lib/utils";
@@ -33,10 +33,8 @@ import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import { Dialog } from "@/components/ui/dialog";
 import { AlertDialog } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -64,6 +62,8 @@ export function ProxiesPage() {
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState<MaskedProxyNode | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [pinging, setPinging] = useState(false);
+  const [lastPing, setLastPing] = useState<{ at: string; target: string } | null>(null);
 
   const [runtime, setRuntime] = useState<ProxyRuntimeStatus | null>(null);
 
@@ -85,19 +85,6 @@ export function ProxiesPage() {
     void load();
   }, [load]);
 
-  const patch = async (id: string, changes: ProxyPatch) => {
-    setBusyId(id);
-    try {
-      const updated = await proxyUpdate(id, changes);
-      setItems((l) => l?.map((n) => (n.id === id ? updated : n)) ?? null);
-      toast({ title: "نود به‌روزرسانی شد", variant: "success" });
-    } catch (err) {
-      toast({ title: "به‌روزرسانی ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setBusyId(null);
-    }
-  };
-
   const doDelete = async () => {
     if (!deleting) return;
     try {
@@ -111,6 +98,52 @@ export function ProxiesPage() {
     }
   };
 
+  /** Ping every node to notebooklm.google.com:443, then reload the list. */
+  const doPingAll = async () => {
+    if (!items || items.length === 0) return;
+    setPinging(true);
+    try {
+      const res = await proxiesPingAll();
+      const bad = res.results.filter((r) => !r.ok).length;
+      setLastPing({ at: res.at, target: res.target });
+      toast({
+        title: `بررسی ${fa(res.results.length)} نود به مقصد ${res.target} تمام شد`,
+        description:
+          bad === 0
+            ? "همه نودها پاسخ دادند."
+            : `${fa(bad)} نود پاسخ ندادند؛ جزئیات را از ستون پینگ ببینید.`,
+        variant: bad === 0 ? "success" : "default",
+      });
+    } catch (err) {
+      toast({ title: "بررسی گروهی ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setPinging(false);
+      await load();
+    }
+  };
+
+  /**
+   * Display order: nodes that answered last, fastest ping first; nodes that
+   * failed (or were never checked) go to the bottom, oldest failures first.
+   */
+  const sorted = useMemo(() => {
+    if (!items) return null;
+    const key = (n: MaskedProxyNode) => {
+      const h = n.health;
+      if (!h || !h.lastCheckedAt) return { t: 2, ms: 0, at: "" };
+      if (!h.ok) return { t: 1, ms: h.latencyMs ?? 0, at: h.lastCheckedAt };
+      return { t: 0, ms: h.latencyMs ?? 0, at: h.lastCheckedAt };
+    };
+    return [...items].sort((a, b) => {
+      const ka = key(a);
+      const kb = key(b);
+      if (ka.t !== kb.t) return ka.t - kb.t;
+      if (ka.t === 0 && ka.ms !== kb.ms) return ka.ms - kb.ms;
+      if (ka.at !== kb.at) return ka.at < kb.at ? 1 : -1;
+      return a.config.name.localeCompare(b.config.name);
+    });
+  }, [items]);
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between">
@@ -122,6 +155,15 @@ export function ProxiesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pinging || !items || items.length === 0}
+            onClick={() => void doPingAll()}
+          >
+            <Activity className={pinging ? "animate-pulse" : undefined} />
+            {pinging ? "در حال بررسی همه نودها…" : "تست پینگ همه نودها"}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => void load()}>
             <RefreshCw />
             تازه‌سازی
@@ -134,6 +176,12 @@ export function ProxiesPage() {
       </CardHeader>
       <CardContent>
         {error && <ErrorBanner message={error} onRetry={() => void load()} />}
+        {lastPing && (
+          <p className="mb-2 text-xs text-muted-foreground">
+            آخرین تست پینگ گروهی به مقصد <span dir="ltr">{lastPing.target}</span> :{" "}
+            <RelativeTime iso={lastPing.at} />
+          </p>
+        )}
 
         {runtime && runtime.state !== "available" && (
           <p className="mb-3 rounded-field border border-warning/40 bg-warning/10 p-3 text-xs leading-6">
@@ -178,66 +226,47 @@ export function ProxiesPage() {
               <TableRow>
                 <TableHead>نود</TableHead>
                 <TableHead>سروور</TableHead>
-                <TableHead>برای حمل</TableHead>
-                <TableHead>ایمنی</TableHead>
-                <TableHead>اولویت</TableHead>
-                <TableHead>فعال</TableHead>
+                <TableHead className="text-left tabular-nums">پینگ (NotebookLM)</TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {items.map((n) => (
+              {(sorted ?? items).map((n) => (
                 <TableRow key={n.id} data-state={detailId === n.id ? "selected" : undefined}>
                   <TableCell>
                     <button
                       type="button"
-                      className="block max-w-48 cursor-pointer truncate text-start text-sm font-medium hover:underline"
+                      className="block max-w-56 cursor-pointer truncate text-start text-sm font-medium hover:underline"
                       title="دیدن جزئیات"
                       onClick={() => setDetailId(detailId === n.id ? null : n.id)}
                     >
                       {n.config.name}
                     </button>
-                    {n.preferred && (
-                      <Badge variant="brand" className="mt-0.5">
-                        ترجیحی
-                      </Badge>
-                    )}
                   </TableCell>
                   <TableCell className="text-xs" dir="ltr">
                     {n.config.server}:{fa(n.config.port)}
                   </TableCell>
-                  <TableCell className="text-xs" dir="ltr">
-                    {n.config.transport}
-                  </TableCell>
-                  <TableCell className="text-xs" dir="ltr">
-                    {n.config.security}
-                  </TableCell>
-                  <TableCell numeric className="text-xs">
-                    {fa(n.priority)}
-                  </TableCell>
-                  <TableCell>
-                    <Switch
-                      checked={n.enabled}
-                      disabled={busyId === n.id}
-                      aria-label={`فعال/غیرفعال ${n.config.name}`}
-                      onCheckedChange={(on) => void patch(n.id, { enabled: on })}
-                    />
+                  <TableCell numeric>
+                    <PingCell node={n} checking={busyId === n.id} />
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       <Button
                         variant="ghost"
                         size="icon"
-                        aria-label="بررسی سلامت"
+                        aria-label="تست پینگ"
                         disabled={busyId === n.id}
                         onClick={async () => {
                           setBusyId(n.id);
                           try {
-                            const res = await proxyHealthCheck(n.id);
+                            const res = await proxyHealthCheck(n.id, { target: "notebooklm" });
+                            await load();
                             setDetailId(n.id);
                             toast({
-                              title: res.ok ? "تunnel و خروجی سالم است" : "بررسی سلامت ناموفق بود",
-                              description: res.error ?? undefined,
+                              title: res.ok
+                                ? `پینگ ${fa(res.latencyMs ?? 0)} ms`
+                                : "پینگ ناموفق بود",
+                              description: res.ok ? undefined : res.error,
                               variant: res.ok ? "success" : "error",
                             });
                           } catch (e) {
@@ -278,12 +307,7 @@ export function ProxiesPage() {
         )}
 
         {detailId && items?.some((n) => n.id === detailId) && (
-          <ProxyDetail
-            key={detailId}
-            nodeId={detailId}
-            onPatch={(p) => void patch(detailId, p)}
-            onHealth={() => void load()}
-          />
+          <ProxyDetail key={detailId} nodeId={detailId} onHealth={() => void load()} />
         )}
       </CardContent>
 
@@ -317,17 +341,45 @@ export function ProxiesPage() {
   );
 }
 
+/* -------------------------------- ping cell -------------------------------- */
+
+/**
+ * Colored ping: <500ms green (سبز), 500–1500ms yellow (زرد), >1500ms red
+ * (قرمز). "بدون پاسخ" (no answer) is red, "تست نشده" (never tested) is
+ * muted. The tooltip carries the last check time and error, if any.
+ */
+function PingCell({ node, checking }: { node: MaskedProxyNode; checking: boolean }) {
+  const h = node.health;
+  if (checking) {
+    return <span className="text-xs text-muted-foreground">در حال تست…</span>;
+  }
+  if (!h || !h.lastCheckedAt) {
+    return <span className="text-xs text-muted-foreground">تست نشده</span>;
+  }
+  const label = (
+    <span className="flex items-center justify-end gap-1.5 text-xs tabular-nums">
+      <span
+        className={`size-2 rounded-full ${
+          !h.ok
+            ? "bg-destructive"
+            : h.latencyMs! < 500
+              ? "bg-success"
+              : h.latencyMs! <= 1500
+                ? "bg-warning"
+                : "bg-destructive"
+        }`}
+        aria-hidden
+      />
+      {h.ok && h.latencyMs !== null ? `${fa(h.latencyMs)} ms` : "بدون پاسخ"}
+    </span>
+  );
+  const tip = h.ok ? `پاسخ در ${fa(h.latencyMs ?? 0)} ms` : (h.error ?? "ناموفق");
+  return <span title={`${tip} — آخرین بررسی: ${h.lastCheckedAt}`}>{label}</span>;
+}
+
 /* ------------------------------- detail panel ------------------------------- */
 
-function ProxyDetail({
-  nodeId,
-  onPatch,
-  onHealth,
-}: {
-  nodeId: string;
-  onPatch: (p: ProxyPatch) => void;
-  onHealth: () => void;
-}) {
+function ProxyDetail({ nodeId, onHealth }: { nodeId: string; onHealth: () => void }) {
   const { toast } = useToast();
   const [detail, setDetail] = useState<{
     node: MaskedProxyNode;
@@ -396,8 +448,6 @@ function ProxyDetail({
   const { node, health, history } = detail;
   const fields: [string, string][] = [
     ["سروور", `${node.config.server}:${node.config.port}`],
-    ["برای حمل", node.config.transport],
-    ["ایمنی", node.config.security],
     ["UUID (ماسک‌دار)", node.config.uuidMasked],
     ["SNI", node.config.sni ?? "—"],
     ["WS Host", node.config.wsHost ?? "—"],
@@ -449,7 +499,7 @@ function ProxyDetail({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-4 lg:grid-cols-3">
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
           {fields.map(([k, v]) => (
             <div
@@ -509,42 +559,6 @@ function ProxyDetail({
           {history.length > 0 && (
             <p className="text-muted-foreground">{fa(history.length)} بررسی در تاریخچه</p>
           )}
-        </div>
-
-        <div className="flex flex-col justify-end gap-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs">فعال</span>
-            <Switch
-              checked={node.enabled}
-              aria-label="فعال/غیرفعال"
-              onCheckedChange={(on) => onPatch({ enabled: on })}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs">ترجیحی</span>
-            <Switch
-              checked={node.preferred}
-              aria-label="ترجیحی"
-              onCheckedChange={(on) => onPatch({ preferred: on })}
-            />
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs">اولویت</span>
-            <Input
-              type="number"
-              dir="ltr"
-              min={0}
-              max={10000}
-              className="h-8 w-24 text-xs"
-              defaultValue={node.priority}
-              onBlur={(e) => {
-                const v = Number(e.target.value);
-                if (Number.isInteger(v) && v >= 0 && v <= 10000 && v !== node.priority) {
-                  onPatch({ priority: v });
-                }
-              }}
-            />
-          </div>
         </div>
       </div>
     </div>

@@ -329,6 +329,21 @@ export interface MaskedProxyNode {
   createdAt: string;
   updatedAt: string;
   config: Omit<ProxyNodeConfig, "uuidSecretRef"> & { uuidMasked: string };
+  /** Last persisted health — only present on list responses. */
+  health?: ProxyHealth | null;
+}
+
+export interface PingAllResult {
+  at: string;
+  /** host:port the checks ran against (notebooklm when allowlisted). */
+  target: string;
+  results: {
+    id: string;
+    ok: boolean;
+    latencyMs: number | null;
+    error: string | null;
+    lastCheckedAt: string;
+  }[];
 }
 
 export interface ProxyDetail {
@@ -434,6 +449,11 @@ export function proxyHealthCheck(
   opts: { target?: "egress" | "notebooklm" } = {},
 ): Promise<ProxyHealthResult> {
   return request(`/api/proxies/${id}/health`, jsonInit("POST", opts));
+}
+
+/** Ping every node to notebooklm.google.com:443 (bounded concurrency server-side). */
+export function proxiesPingAll(): Promise<PingAllResult> {
+  return request("/api/proxies/ping-all", jsonInit("POST", {}));
 }
 
 export interface ProxyRuntimeStatus {

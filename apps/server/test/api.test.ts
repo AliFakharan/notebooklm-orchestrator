@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/api/server.js";
-import { makeAppContext } from "./helpers.js";
+import { addNode, makeAppContext } from "./helpers.js";
 import type { AppContext } from "../src/app-context.js";
 
 /**
@@ -372,6 +372,54 @@ describe("proxies", () => {
     });
     expect(del.statusCode).toBe(204);
     expect(ctx.vault.has(`vless-uuid:${uuid}`)).toBe(false);
+  });
+
+  it("ping-all checks every node and persists per-node health rows", async () => {
+    // Isolated context: fixed-IP allowlist (no notebooklm.google.com) so
+    // destination selection is deterministic; xray runtime WITHOUT its
+    // binary so every staged check fails fast at the runtime stage — no
+    // network I/O. This asserts endpoint semantics and persistence.
+    const ctx2 = await makeAppContext({
+      NLO_ADMIN_TOKEN: "test-token-123",
+      NLO_HEALTH_ALLOWLIST: "93.184.216.34:443",
+      NLO_PROXY_RUNTIME: "xray",
+    });
+    const app2 = await buildApp(ctx2);
+    await app2.ready();
+    try {
+      addNode(ctx2.proxies, ctx2.vault, "ping-a");
+      const b = addNode(ctx2.proxies, ctx2.vault, "ping-b");
+
+      const res = await app2.inject({
+        method: "POST",
+        url: "/api/proxies/ping-all",
+        headers: auth,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        at: string;
+        target: string;
+        results: { id: string; ok: boolean; latencyMs: number | null; error: string | null }[];
+      };
+      expect(typeof body.at).toBe("string");
+      // Allowlist has no notebooklm.google.com, so the first entry is used.
+      expect(body.target).toBe("93.184.216.34:443");
+      const ids = new Set(ctx2.proxies.list().map((n) => n.id));
+      expect(body.results.length).toBe(ids.size);
+      for (const r of body.results) expect(ids.has(r.id)).toBe(true);
+      // Runtime is not configured, so every node gets a (failed) verdict.
+      for (const r of body.results) {
+        expect(r.ok).toBe(false);
+        expect(r.error ?? "").toContain("Xray binary is not installed");
+      }
+
+      // Each node's health row was persisted (freshness the UI can display).
+      const got = await app2.inject({ method: "GET", url: `/api/proxies/${b.id}`, headers: auth });
+      expect(got.json().health.lastCheckedAt).toBeTypeOf("string");
+    } finally {
+      await app2.close();
+      await ctx2.close();
+    }
   });
 });
 

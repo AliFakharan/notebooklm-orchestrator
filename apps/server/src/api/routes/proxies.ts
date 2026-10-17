@@ -72,7 +72,49 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
     return reply.code(201).send({ node: maskNode(node) });
   });
 
-  app.get("/api/proxies", async () => ctx.proxies.list().map(maskNode));
+  // List with the persisted per-node health (last check), so the UI can
+  // show a latency column without running fresh checks on load.
+  app.get("/api/proxies", async () =>
+    ctx.proxies.list().map((n) => ({ ...maskNode(n), health: ctx.proxies.health(n.id) })),
+  );
+
+  // Ping ALL nodes with a bounded concurrency. Each check is the same
+  // staged, SSRF-guarded health check as the single-node endpoint and
+  // persists its own health row, so a subsequent list call reflects the
+  // fresh latencies. Destination: notebooklm.google.com:443 when it is
+  // allowlisted (the default), otherwise the first allowlist entry — the
+  // SSRF guard only permits allowlisted targets, and tests use a fixed-IP
+  // allowlist that deliberately excludes the real host.
+  app.post("/api/proxies/ping-all", async () => {
+    const nblHost = "notebooklm.google.com";
+    const nblAllowed = ctx.config.healthAllowlist.some(
+      (e) => (e.includes(":") ? (e.split(":")[0] ?? "") : e).replace(/^\[|\]$/g, "") === nblHost,
+    );
+    const dest = nblAllowed ? { host: nblHost, port: 443 } : destFromAllowlist(ctx);
+    const nodes = ctx.proxies.list();
+    const results = await mapLimit(nodes, 6, async (n) => {
+      const at = new Date().toISOString();
+      try {
+        const res = await ctx.proxyManager.runHealthCheck(n.id, dest);
+        return {
+          id: n.id,
+          ok: res.ok,
+          latencyMs: res.latencyMs,
+          error: res.error,
+          lastCheckedAt: at,
+        };
+      } catch (e) {
+        return {
+          id: n.id,
+          ok: false,
+          latencyMs: null,
+          error: (e as Error).message,
+          lastCheckedAt: at,
+        };
+      }
+    });
+    return { at: new Date().toISOString(), target: `${dest.host}:${dest.port}`, results };
+  });
 
   app.get<{ Params: { id: string } }>("/api/proxies/:id", async (req) => {
     const n = ctx.proxies.get(req.params.id);
@@ -190,6 +232,26 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: false, error: (err as Error).message };
     }
   });
+}
+
+/** Run an async map over items with at most `limit` concurrent tasks. */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i] as T;
+      out[i] = await fn(item);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 function destFromAllowlist(ctx: AppContext): { host: string; port: number } {
