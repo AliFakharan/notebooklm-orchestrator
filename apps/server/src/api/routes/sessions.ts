@@ -52,12 +52,18 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     inFlight.delete(accountId);
   };
 
-  /** Keep the account row's visible identity in sync with the verified one. */
+  /** Keep the account row in sync after a service-verified session. */
   function syncAccountIdentity(accountId: string, email: string | null): void {
     const acct = ctx.accounts.get(accountId);
     if (!acct || !email) return;
     if (acct.displayEmail !== email) {
       ctx.accounts.update(accountId, { displayEmail: email });
+    }
+    // A verified login clears a stale AUTH_REQUIRED flag set by an earlier
+    // failed job — the fresh service verification is stronger evidence.
+    // DISABLED (manual) always wins and is never overridden here.
+    if (acct.status === "AUTH_REQUIRED" || acct.status === "UNKNOWN") {
+      ctx.accounts.update(accountId, { status: "ACTIVE" });
     }
     ctx.accounts.update(accountId, { lastVerifiedAt: new Date().toISOString() });
   }

@@ -304,10 +304,13 @@ export class JobRunner {
   private selectAccount(job: Job): AccountRow {
     const eligibleIds = this.d.sessions?.eligibleAccountIds() ?? null;
     const eligible = (a: AccountRow): boolean => {
-      if (!a.enabled || a.status === "DISABLED" || a.status === "AUTH_REQUIRED") {
-        return false;
-      }
-      if (eligibleIds !== null && !eligibleIds.has(a.id)) return false;
+      if (!a.enabled || a.status === "DISABLED") return false;
+      // With a live session registry, the verified session is the source of
+      // truth: a stale AUTH_REQUIRED flag (from an old failed job) must not
+      // shadow a freshly verified login.
+      if (eligibleIds !== null) return eligibleIds.has(a.id);
+      // No registry (mock provider): fall back to the row flag.
+      if (a.status === "AUTH_REQUIRED") return false;
       return true;
     };
 
@@ -318,9 +321,11 @@ export class JobRunner {
       }
       const why = !preferred
         ? "not found"
-        : eligibleIds !== null && !eligibleIds.has(preferred.id)
-          ? "session not verified (re-authentication required)"
-          : "not enabled / disabled / auth-required";
+        : !preferred.enabled || preferred.status === "DISABLED"
+          ? "not enabled / disabled"
+          : eligibleIds !== null
+            ? "session not verified (re-authentication required)"
+            : "not enabled / disabled / auth-required";
       this.d.jobs.setStatus(job.id, "FAILED", {
         errorClass: "auth",
         errorMessage: `requested account "${preferred?.label ?? job.input.preferredAccountId}" is not usable: ${why}`,
