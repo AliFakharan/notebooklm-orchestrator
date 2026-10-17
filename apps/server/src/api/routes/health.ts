@@ -42,7 +42,7 @@ export function registerHealthRoutes(app: FastifyInstance, ctx: AppContext): voi
     if (!account) {
       throw new ApiError(ApiCodes.notFound, "account not found", 404);
     }
-    const credentialRef = account.authSecretRef ?? `mock-cred:${account.id}`;
+    const credentialRef = account.authSecretRef ?? `session:${account.id}`;
     const status = await ctx.provider.getAccountStatus(account.id, credentialRef);
     return { accountId, ...status };
   });

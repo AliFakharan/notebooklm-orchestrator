@@ -81,7 +81,7 @@ export function registerAccountRoutes(app: FastifyInstance, ctx: AppContext): vo
   app.post<{ Params: { id: string } }>("/api/accounts/:id/health", async (req) => {
     const a = ctx.accounts.get(req.params.id);
     if (!a) throw new ApiError(ApiCodes.notFound, "account not found", 404);
-    const credentialRef = a.authSecretRef ?? `mock-cred:${a.id}`;
+    const credentialRef = a.authSecretRef ?? `session:${a.id}`;
     const status = await ctx.provider.getAccountStatus(a.id, credentialRef);
     // Persist a conservative status change only on clear outcomes.
     if (!status.ok && status.detail?.includes("re-auth")) {

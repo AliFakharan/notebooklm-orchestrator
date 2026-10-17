@@ -166,7 +166,7 @@ export class JobRunner {
         const job = this.d.jobs.getOrThrow(jobId);
         this.d.jobs.setStatus(jobId, "RUNNING", { accountId: account.id, nodeId });
         this.logEvent(jobId, archive, "running", `attempt ${job.attempt + 1}`);
-        const credentialRef = account.authSecretRef ?? `mock-cred:${account.id}`;
+        const credentialRef = account.authSecretRef ?? `session:${account.id}`;
         const attemptStart = new Date().toISOString();
         const attemptNo = job.attempt + 1;
 
