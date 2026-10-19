@@ -1,0 +1,36 @@
+# Runtime data — never baked into the image (mounted as a volume instead).
+
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.key
+*.pem
+
+# Local env (compose interpolates it; must NOT be baked in).
+
+.env
+.env.*
+!.env.example
+
+# VCS / editor / logs
+
+.git
+.gitignore
+.idea
+.vscode
+*.log
+logs/
+
+# The Docker build reuses the host's node_modules and apps/web/dist so the
+
+# image can be built on machines WITHOUT npm-registry access. Only the heavy
+
+# parts are excluded (not needed at runtime). NOTE: nested node_modules are
+
+# KEPT because npm's hoisted layout depends on them.
+
+node_modules/.cache
+node_modules/playwright-core/.local-browsers
+apps/web/dist/assets/*.map
+*.tsbuildinfo

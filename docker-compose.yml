@@ -1,0 +1,47 @@
+# NotebookLM Orchestrator — local single-user container.
+#
+#   docker compose up --build -d
+#   → UI on http://127.0.0.1:4870 (host loopback only)
+#
+# Data (SQLite, job archives, vault, session cookies, xray vendor) persists in
+# ./data. For live mode (real NotebookLM + xray tunnel), put your .env next to
+# this file and make sure data/vendor/ has the xray binary + geo files.
+# See docs/quick-start.md → section 3.
+
+services:
+  nlo:
+    build: .
+    container_name: nlo
+    restart: unless-stopped
+    # Run as your host uid/gid so the bind-mounted ./data stays writable
+    # (default 1000:1000; override in .env if your uid differs).
+    user: "${NLO_UID:-1000}:${NLO_GID:-1000}"
+    ports:
+      # Loopback only on purpose: no user system / no token — the trust
+      # boundary is the machine. Change to "4870:4870" ONLY behind an
+      # auth-capable reverse proxy, and set NLO_HOST=0.0.0.0 in .env.
+      - "127.0.0.1:${NLO_PORT:-4870}:4870"
+    volumes:
+      - ./data:/data
+    # Compose interpolates these from the project's .env (same file as
+    # bare mode) — set live-mode knobs there, e.g.:
+    #   NLO_PROVIDER=python-worker
+    #   NLO_PROXY_RUNTIME=xray
+    #   NLO_PYTHON_BIN=/data/venv/bin/python
+    environment:
+      NLO_DATA_DIR: /data
+      # 0.0.0.0 is required inside the container for Docker's port-forward;
+      # it stays safe because only the host loopback is published above.
+      # (Overrides NLO_HOST from your .env, if present.)
+      NLO_HOST: 0.0.0.0
+      NLO_PORT: "4870"
+      NLO_PROVIDER: ${NLO_PROVIDER:-mock}
+      NLO_PROXY_RUNTIME: ${NLO_PROXY_RUNTIME:-mock}
+      # Pin to the venv baked into the image (/opt/nbl-venv). Do NOT interpolate
+      # NLO_PYTHON_BIN here: in bare mode your .env points at a HOST path
+      # (e.g. /home/.../data/venv/bin/python) which does not exist inside the
+      # container and breaks worker spawn.
+      NLO_PYTHON_BIN: /opt/nbl-venv/bin/python
+      NLO_JOB_TIMEOUT_MS: ${NLO_JOB_TIMEOUT_MS:-1800000}
+    # Outbound internet is needed for live mode (xray tunnel to VLESS nodes).
+    # Mock mode works fully offline.
