@@ -3,7 +3,6 @@ import {
   Boxes,
   Download,
   KeyRound,
-  LogIn,
   LogOut,
   Pencil,
   Plus,
@@ -22,7 +21,6 @@ import {
   providerInfo,
   sessionBrowserImport,
   sessionImport,
-  sessionLogin,
   sessionLogout,
   sessionRefresh,
   sessionsList,
@@ -129,29 +127,6 @@ export function AccountsPage() {
       toast({ title: "بررسی وضعیت ناموفق بود", description: errMessage(err), variant: "error" });
     } finally {
       setBusyId(null);
-    }
-  };
-
-  const doLogin = async (a: Account) => {
-    setBusyId(a.id);
-    toast({
-      title: "در حال باز کردن مرورگر برای ورود…",
-      description:
-        "در پنجره‌ای که باز می‌شود وارد گوگل شوید. اگر گوگل این مرورگر را رد کند (پیام «مرورگر یا اپلیکیشن ایمن نیست»), از «دریافت از مرورگر واقعی» استفاده کنید.",
-      variant: "success",
-    });
-    try {
-      await sessionLogin(a.id, { timeoutSec: 600 });
-      toast({
-        title: "ورود موفق بود",
-        description: "جلسه ذخیره و در برابر سرویس واقعی تأیید شد.",
-        variant: "success",
-      });
-    } catch (err) {
-      toast({ title: "ورود ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setBusyId(null);
-      void load();
     }
   };
 
@@ -313,7 +288,6 @@ export function AccountsPage() {
                       <SessionCell
                         view={sessions[a.id] ?? null}
                         busy={busyId === a.id}
-                        onLogin={() => void doLogin(a)}
                         onVerify={() => void doVerify(a)}
                         onLogout={() => void doLogout(a)}
                         onImportFromBrowser={() => setImporting(a)}
@@ -860,14 +834,13 @@ function PasteImportDialog({
 
 /**
  * SessionCell: the real auth-session state machine for one account and the
- * full action set (sign in / import from real browser / advanced paste /
- * verify / logout). States shown: not configured, ready, waiting, importing
- * (in progress), verified, expired, invalid, wrong account, re-auth needed.
+ * full action set (import from real browser / advanced paste / verify /
+ * logout). States shown: not configured, ready, verified, expired, invalid,
+ * wrong account, re-auth needed.
  */
 function SessionCell({
   view,
   busy,
-  onLogin,
   onVerify,
   onLogout,
   onImportFromBrowser,
@@ -875,7 +848,6 @@ function SessionCell({
 }: {
   view: SessionAccountView | null;
   busy: boolean;
-  onLogin: () => void;
   onVerify: () => void;
   onLogout: () => void;
   onImportFromBrowser: () => void;
@@ -946,16 +918,6 @@ function SessionCell({
         >
           <Download />
           مرورگر واقعی
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="ورود با مرورگر"
-          title="ورود تعاملی با مرورگر خودکار (ممکن است توسط گوگل رد شود)"
-          disabled={busy || inProgress}
-          onClick={onLogin}
-        >
-          <LogIn />
         </Button>
         <Button
           variant="ghost"

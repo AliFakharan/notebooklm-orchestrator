@@ -3,20 +3,38 @@
 اپلیکیشن **محلی** (تک‌کاربر، loopback) برای مدیریت درخواست‌های «صوت + دستور» به NotebookLM،
 مدیریت حساب‌های گوگل و نودهای VLESS، اجرای نوبتی کارها، آرشیو و نمایش فارسی RTL.
 
+- شروع سریع (نصب + mock + حالت زنده + Docker): [`docs/quick-start.md`](docs/quick-start.md)
 - مستندات: [`docs/architecture.md`](docs/architecture.md)، [`docs/security.md`](docs/security.md)،
   [`docs/provider-evaluation.md`](docs/provider-evaluation.md)، [`docs/proxy-design.md`](docs/proxy-design.md)،
   [`docs/development-plan.md`](docs/development-plan.md)
 - مخازن مرجع (فقط مرجع، اجرا نمی‌شوند): `../research/`
 
-## اجرا (توسعه)
+## اجرا
+
+**ساده‌ترین راه (Docker):**
+
+```bash
+docker compose up --build -d     # UI روی http://127.0.0.1:4870
+```
+
+**بدون Docker:**
 
 ```bash
 npm install
-npm run dev          # server روی 127.0.0.1:4870 + web روی 127.0.0.1:5173 (proxy /api به server)
+npm run build
+npm run start --workspace @nlo/server   # UI + API روی http://127.0.0.1:4870
 ```
 
-بعد از `npm run build`، server همان `apps/web/dist` را با SPA fallback روی 127.0.0.1:4870 سرو می‌کند
-(یک پورت برای همه: API + وب). مسیرهای /api در 404، envelope JSON نگه می‌مانند.
+server همان `apps/web/dist` را با SPA fallback سرو می‌کند (یک پورت برای همه:
+API + وب). مسیرهای /api در 404، envelope JSON نگه می‌مانند.
+حالت پیش‌فرض **mock** است؛ حالت زنده (حساب گوگل واقعی + پراکسی Xray) در بخش
+زیر و در [`docs/quick-start.md`](docs/quick-start.md) توضیح داده شده.
+
+## اجرا (توسعه)
+
+```bash
+npm run dev          # server روی 127.0.0.1:4870 + web روی 127.0.0.1:5173 (proxy /api به server)
+```
 
 ## دستورات
 
@@ -59,7 +77,9 @@ cp .env.example .env
 # ۴) راه‌اندازی
 npm run dev
 
-# ۵) در UI: یک حساب بسازید ← دکمه‌ی «ورود» (مرورگر واقعی باز می‌شود، ورود گوگل)
+# ۵) در UI: یک حساب بسازید ← «دریافت از مرورگر واقعی» (کوکی‌های نشست گوگل
+#    از مرورگر خودت روی همین دستگاه خوانده و verify می‌شود) یا «ورود پیشرفته
+#    (storage-state)» برای آپلود storage-state JSON
 #    یک نود VLESS بسازید ← «سلامت (امتحان خروج)» و «سلامت (مقصد NotebookLM)»
 
 # ۶) اعتبارسنجی زنده (manual gate؛ هرگز در CI اجرا نمی‌شود)

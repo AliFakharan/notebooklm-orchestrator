@@ -4,13 +4,11 @@ import {
   Boxes,
   Cable,
   Gauge,
-  LogOut,
   PlusCircle,
   Radio,
   Settings,
   SlidersHorizontal,
 } from "lucide-react";
-import { useAuth } from "./auth-gate";
 import { Button } from "@/components/ui/button";
 import { Sidebar, SidebarGroup, SidebarItem } from "@/components/ui/sidebar";
 
@@ -48,7 +46,6 @@ function NavLinkItem({
  * main column shows the page content.
  */
 export function AppLayout() {
-  const { signOut, hasToken } = useAuth();
   const location = useLocation();
 
   return (
@@ -95,11 +92,6 @@ export function AppLayout() {
                 <SlidersHorizontal />
               </Button>
             </NavLink>
-            {hasToken && (
-              <Button variant="ghost" size="icon" aria-label="خروج" onClick={signOut}>
-                <LogOut />
-              </Button>
-            )}
           </div>
         </header>
 

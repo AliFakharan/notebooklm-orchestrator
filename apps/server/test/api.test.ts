@@ -6,7 +6,7 @@ import type { AppContext } from "../src/app-context.js";
 
 /**
  * API integration tests against the real Fastify app (loopback, ephemeral
- * port via inject()). Covers auth, the error envelope, jobs, proxies
+ * port via inject()). Covers the error envelope, jobs, proxies
  * (secret masking), accounts, provider info, and settings.
  *
  * Note: the app's background queue is stopped in the test context so HTTP
@@ -15,11 +15,13 @@ import type { AppContext } from "../src/app-context.js";
 
 let ctx: AppContext;
 let app: FastifyInstance;
-const auth = { Authorization: "Bearer test-token-123" };
+// Local single-user model: no bearer token — the header is kept as an empty
+// object so call sites stay uniform.
+const auth: Record<string, string> = {};
 const MP_BOUNDARY = "----nlo-test-boundary";
 
 beforeEach(async () => {
-  ctx = await makeAppContext({ NLO_ADMIN_TOKEN: "test-token-123" });
+  ctx = await makeAppContext({});
   app = await buildApp(ctx);
   await app.ready();
 });
@@ -65,20 +67,11 @@ function mpInject(parts: MpPart[]) {
   });
 }
 
-describe("admin token auth", () => {
-  it("rejects API calls without a token (401) but allows /api/health", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/accounts" });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("unauthorized");
-
+describe("health", () => {
+  it("exposes readiness without auth", async () => {
     const health = await app.inject({ method: "GET", url: "/api/health" });
     expect(health.statusCode).toBe(200);
     expect(health.json().ok).toBe(true);
-  });
-
-  it("accepts the correct bearer token", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/accounts", headers: auth });
-    expect(res.statusCode).toBe(200);
   });
 });
 
@@ -380,7 +373,6 @@ describe("proxies", () => {
     // binary so every staged check fails fast at the runtime stage — no
     // network I/O. This asserts endpoint semantics and persistence.
     const ctx2 = await makeAppContext({
-      NLO_ADMIN_TOKEN: "test-token-123",
       NLO_HEALTH_ALLOWLIST: "93.184.216.34:443",
       NLO_PROXY_RUNTIME: "xray",
     });

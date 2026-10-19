@@ -41,7 +41,6 @@ interface DashboardData {
   accountsTotal: number;
   accountsReady: number;
   proxiesTotal: number;
-  proxiesEnabled: number;
   proxies: MaskedProxyNode[];
 }
 
@@ -73,7 +72,6 @@ export function DashboardPage() {
         accountsTotal: accounts.length,
         accountsReady: accounts.filter((a) => a.status === "ACTIVE" && a.enabled).length,
         proxiesTotal: proxies.length,
-        proxiesEnabled: proxies.filter((p) => p.enabled).length,
         proxies,
       });
     } catch (err) {
@@ -108,11 +106,7 @@ export function DashboardPage() {
               value={fa(data.accountsReady)}
               unit={`از ${fa(data.accountsTotal)}`}
             />
-            <Stat
-              label="پراکسی‌های فعال"
-              value={fa(data.proxiesEnabled)}
-              unit={`از ${fa(data.proxiesTotal)}`}
-            />
+            <Stat label="پراکسی‌ها" value={fa(data.proxiesTotal)} />
           </>
         )}
       </div>
@@ -177,8 +171,10 @@ export function DashboardPage() {
                       <TableCell>
                         <Link to={`/jobs/${job.id}`} className="group block min-w-0">
                           <p className="truncate text-sm font-medium group-hover:underline">
-                            {job.input.prompt.slice(0, 60)}
-                            {job.input.prompt.length > 60 ? "…" : ""}
+                            {job.input.title ??
+                              (job.input.prompt.length > 60
+                                ? `${job.input.prompt.slice(0, 60)}…`
+                                : job.input.prompt)}
                           </p>
                           <p className="truncate text-xs text-muted-foreground" dir="ltr">
                             {job.id}

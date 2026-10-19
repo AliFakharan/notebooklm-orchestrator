@@ -3,7 +3,6 @@ import {
   Activity,
   Cable,
   CheckCircle2,
-  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -281,14 +280,6 @@ export function ProxiesPage() {
                         }}
                       >
                         <Wifi className={busyId === n.id ? "animate-pulse" : undefined} />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label="ویرایش"
-                        onClick={() => setDetailId(n.id)}
-                      >
-                        <Pencil />
                       </Button>
                       <Button
                         variant="ghost"

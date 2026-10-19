@@ -131,7 +131,14 @@ export function JobDetailsPage() {
                 <Badge variant="destructive">{FAILURE_CLASS_LABELS[job.errorClass]}</Badge>
               )}
             </div>
-            <h2 className="mt-2 text-base font-semibold leading-7">{job.input.prompt}</h2>
+            <h2 className="mt-2 text-base font-semibold leading-7">
+              {job.input.title ?? job.input.prompt}
+            </h2>
+            {job.input.title && (
+              <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                {job.input.prompt}
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
               <span>
                 ساخته‌شده: <RelativeTime iso={job.createdAt} />

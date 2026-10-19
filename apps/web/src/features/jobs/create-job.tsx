@@ -12,7 +12,7 @@ import {
 import { faFileSize } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Field } from "@/components/ui/input";
+import { Field, Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,7 @@ export function CreateJobPage() {
   const { toast } = useToast();
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [maxPromptChars, setMaxPromptChars] = useState(20_000);
   const [file, setFile] = useState<File | null>(null);
@@ -80,6 +81,7 @@ export function CreateJobPage() {
     setSubmitError(null);
     try {
       const res = await jobCreate({
+        title: title.trim() || undefined,
         prompt: prompt.trim(),
         audio: file,
         preferredAccountId: accountId || null,
@@ -109,6 +111,15 @@ export function CreateJobPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} className="flex flex-col gap-5">
+            <Field label="عنوان (اختیاری)" htmlFor="title">
+              <Input
+                id="title"
+                placeholder="مثلاً: خلاصه‌ی پادکست شماره ۱۲"
+                maxLength={120}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+              />
+            </Field>
             <Field label="سؤال / دستور" htmlFor="prompt">
               <Textarea
                 id="prompt"

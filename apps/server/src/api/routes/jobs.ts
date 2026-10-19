@@ -57,6 +57,7 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     const preferredAccountId = fields.preferredAccountId || null;
     const preferredNodeId = fields.preferredNodeId || null;
+    const title = (fields.title ?? "").trim() || null;
 
     // Reject an unknown account ID up front (clearer than a runner failure
     // later); the runner re-checks eligibility + a live verified session.
@@ -105,6 +106,7 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     const job = ctx.jobs.create({
       input: {
         prompt,
+        title,
         audio: audioMeta,
         preferredAccountId,
         preferredNodeId,

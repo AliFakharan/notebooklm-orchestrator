@@ -134,8 +134,12 @@ export class AccountsRepo {
   }
 
   recordSuccess(id: string): void {
+    // A successful run also clears a stale error and a DEGRADED state, so the
+    // UI does not keep showing an old failure under a working account.
     this.db.raw
-      .prepare("UPDATE accounts SET last_success_at=?, updated_at=? WHERE id=?")
+      .prepare(
+        "UPDATE accounts SET last_success_at=?, last_error=NULL, status='ACTIVE', updated_at=? WHERE id=?",
+      )
       .run(this.db.now(), this.db.now(), id);
   }
 

@@ -43,15 +43,6 @@ export class NetworkError extends Error {
   }
 }
 
-/** Session-only token holder (module scope; never persisted). */
-let adminToken: string | null = null;
-export function setAdminToken(token: string | null): void {
-  adminToken = token;
-}
-export function getAdminToken(): string | null {
-  return adminToken;
-}
-
 async function errorFrom(res: Response): Promise<ApiClientError | null> {
   try {
     const ct = res.headers.get("content-type") ?? "";
@@ -79,9 +70,7 @@ async function errorFrom(res: Response): Promise<ApiClientError | null> {
 export async function jobAudioBlobUrl(jobId: string): Promise<{ url: string; type: string }> {
   let res: Response;
   try {
-    const headers: Record<string, string> = {};
-    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
-    res = await fetch(`/api/jobs/${jobId}/audio`, { headers });
+    res = await fetch(`/api/jobs/${jobId}/audio`);
   } catch {
     throw new NetworkError();
   }
@@ -97,9 +86,7 @@ export async function jobAudioBlobUrl(jobId: string): Promise<{ url: string; typ
 export async function downloadJobAudio(jobId: string): Promise<void> {
   let res: Response;
   try {
-    const headers: Record<string, string> = {};
-    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
-    res = await fetch(`/api/jobs/${jobId}/audio/download`, { headers });
+    res = await fetch(`/api/jobs/${jobId}/audio/download`);
   } catch {
     throw new NetworkError();
   }
@@ -130,7 +117,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
   };
-  if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
 
   let res: Response;
   try {
@@ -195,12 +181,14 @@ export interface CreateJobResult {
 
 export function jobCreate(input: {
   prompt: string;
+  title?: string;
   audio: File | null;
   preferredAccountId?: string | null;
   preferredNodeId?: string | null;
 }): Promise<CreateJobResult> {
   const fd = new FormData();
   fd.append("prompt", input.prompt);
+  if (input.title) fd.append("title", input.title);
   if (input.audio) fd.append("audio", input.audio);
   if (input.preferredAccountId) fd.append("preferredAccountId", input.preferredAccountId);
   if (input.preferredNodeId) fd.append("preferredNodeId", input.preferredNodeId);
@@ -236,9 +224,7 @@ export function jobArtifacts(id: string): Promise<Artifact[]> {
 export async function artifactDownload(jobId: string, artifactId: string): Promise<string> {
   let res: Response;
   try {
-    const headers: Record<string, string> = {};
-    if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
-    res = await fetch(`/api/jobs/${jobId}/artifacts/${artifactId}`, { headers });
+    res = await fetch(`/api/jobs/${jobId}/artifacts/${artifactId}`);
   } catch {
     throw new NetworkError();
   }

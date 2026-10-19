@@ -142,6 +142,8 @@ export interface Artifact {
 
 export interface JobInput {
   prompt: string;
+  /** Optional human-friendly title; when absent the prompt is displayed. */
+  title?: string | null;
   audio: {
     originalName: string;
     mediaType: string;

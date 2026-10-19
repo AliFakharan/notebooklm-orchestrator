@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   accountsList,
   ApiClientError,
@@ -6,7 +6,6 @@ import {
   jobsList,
   NetworkError,
   providerInfo,
-  setAdminToken,
 } from "./api";
 
 function jsonResponse(status: number, body: unknown) {
@@ -18,13 +17,8 @@ function jsonResponse(status: number, body: unknown) {
   );
 }
 
-beforeEach(() => {
-  setAdminToken(null);
-});
-
 afterEach(() => {
   vi.restoreAllMocks();
-  setAdminToken(null);
 });
 
 describe("request envelope", () => {
@@ -67,17 +61,7 @@ describe("request envelope", () => {
     expect(err).toBeInstanceOf(NetworkError);
   });
 
-  it("sends the bearer token when one is set", async () => {
-    setAdminToken("sekret-token");
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, []));
-    vi.stubGlobal("fetch", fetchMock);
-    await accountsList();
-    const [, init] = fetchMock.mock.calls[0]!;
-    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer sekret-token");
-    setAdminToken(null);
-  });
-
-  it("omits the auth header when no token is set", async () => {
+  it("omits the auth header (no token model)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, []));
     vi.stubGlobal("fetch", fetchMock);
     await accountsList();

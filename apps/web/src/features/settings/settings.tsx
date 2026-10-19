@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { KeyRound, RefreshCw, Save } from "lucide-react";
+import { RefreshCw, Save } from "lucide-react";
 import { secretsList, settingsGet, settingsPut, type SecretEntry } from "@/lib/api";
 import { faNumber } from "@/lib/utils";
-import { useAuth } from "@/app/auth-gate";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
@@ -26,7 +25,6 @@ import { useToast } from "@/components/ui/toast";
  */
 export function SettingsPage() {
   const { toast } = useToast();
-  const { signOut, hasToken, authenticate } = useAuth();
   const [settings, setSettings] = useState<{
     jobsMaxAttemptsDefault: number;
     jobsMaxPromptChars: number;
@@ -34,8 +32,6 @@ export function SettingsPage() {
   const [secrets, setSecrets] = useState<SecretEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [tokenInput, setTokenInput] = useState("");
-  const [reauthBusy, setReauthBusy] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -69,24 +65,6 @@ export function SettingsPage() {
       });
     } finally {
       setSaving(false);
-    }
-  };
-
-  const reauthenticate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setReauthBusy(true);
-    try {
-      await authenticate(tokenInput);
-      toast({ title: "توکن به‌روزرسانی شد", variant: "success" });
-      setTokenInput("");
-    } catch (err) {
-      toast({
-        title: "تأیید توکن ناموفق بود",
-        description: err instanceof Error ? err.message : undefined,
-        variant: "error",
-      });
-    } finally {
-      setReauthBusy(false);
     }
   };
 
@@ -224,36 +202,13 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>توکن نشست</CardTitle>
+          <CardTitle>حساب کاربری</CardTitle>
           <CardDescription>
-            توکن فقط در حافظه‌ی مرورگر برای این نشست نگه داشته می‌شود و در هیچ ذخیره‌ای ثبت نمی‌شود.
-            با بستن صفحه‌ی مرورگر، نشست منقضی می‌شود.
+            این نسخه‌ی تک‌کاربر است: بدون ساخت کاربر و بدون توکن؛ دسترسی از طریق همین مرورگر و فقط
+            روی همین دستگاه (بسته‌بندی loopback سرور) ممکن است.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <p className="text-xs text-muted-foreground">
-            وضعیت: {hasToken ? "توکن فعال است" : "بدون توکن (احراز هویت روی سرور غیرفعال است)"}
-          </p>
-          <form onSubmit={reauthenticate} className="flex flex-wrap items-end gap-3">
-            <Field label="توکن جدید" htmlFor="new-token" className="min-w-64 flex-1">
-              <Input
-                id="new-token"
-                type="password"
-                dir="ltr"
-                autoComplete="off"
-                placeholder="••••••••••••"
-                value={tokenInput}
-                onChange={(e) => setTokenInput(e.target.value)}
-              />
-            </Field>
-            <Button type="submit" variant="outline" disabled={reauthBusy}>
-              <KeyRound />
-              {reauthBusy ? "در حال تأیید…" : "تغییر توکن"}
-            </Button>
-            <Button type="button" variant="ghost" onClick={signOut}>
-              پایان نشست
-            </Button>
-          </form>
+        <CardContent>
           <Button variant="outline" size="sm" onClick={() => void load()}>
             <RefreshCw />
             تازه‌سازی

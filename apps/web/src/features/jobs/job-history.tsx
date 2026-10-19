@@ -148,7 +148,12 @@ export function JobHistoryPage() {
                     <TableCell>
                       <Link to={`/jobs/${job.id}`} className="group block min-w-0">
                         <p className="max-w-md truncate text-sm font-medium group-hover:underline">
-                          {job.input.prompt}
+                          {(() => {
+                            const t = job.input.title;
+                            if (t) return t;
+                            const p = job.input.prompt;
+                            return p.length > 80 ? `${p.slice(0, 80)}…` : p;
+                          })()}
                         </p>
                         <p className="text-xs text-muted-foreground" dir="ltr">
                           {job.id}

@@ -6,7 +6,6 @@ export interface AppConfig {
   host: string;
   port: number;
   dataDir: string;
-  adminToken: string | null;
   vaultKey: string | null;
   provider: "mock" | "python-worker";
   proxyRuntime: "mock" | "xray";
@@ -127,7 +126,6 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     host,
     port: intEnv("NLO_PORT", 4870),
     dataDir,
-    adminToken: env("NLO_ADMIN_TOKEN") || null,
     vaultKey: vaultKey ?? null,
     provider: provider as AppConfig["provider"],
     proxyRuntime: proxyRuntime as AppConfig["proxyRuntime"],

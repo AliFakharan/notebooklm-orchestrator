@@ -15,11 +15,13 @@ import { registerSettingsRoutes } from "./routes/settings.js";
 
 /**
  * Build the Fastify app. Binds to config.host (default 127.0.0.1).
- * Security:
- *  - optional bearer admin token (NLO_ADMIN_TOKEN) on all /api except /api/health
+ * Security (local single-user model):
+ *  - loopback-only binding by default; there is NO user system and NO
+ *    bearer token — the trust boundary is the machine, so never bind to
+ *    0.0.0.0 on an exposed interface (main.ts warns when it happens)
  *  - rate limiting
  *  - consistent error envelope with redaction (never leak secrets/stacks)
- *  - CORS restricted to the Vite dev origin (loopback)
+ *  - CORS restricted to loopback origins
  */
 export interface BuildAppOptions {
   /**
@@ -61,19 +63,6 @@ export async function buildApp(
       fields: 32,
       files: 4,
     },
-  });
-
-  // --- auth (optional) -----------------------------------------------------
-  app.addHook("onRequest", async (req, reply) => {
-    const token = ctx.config.adminToken;
-    if (!token) return; // auth disabled (local single-user, loopback)
-    if (req.url.startsWith("/api/health")) return; // readiness is public
-    if (!req.url.startsWith("/api")) return; // only the API carries data (SPA static files are public)
-    const header = req.headers.authorization;
-    if (header === `Bearer ${token}`) return;
-    return reply.code(401).send({
-      error: { code: ApiCodes.unauthorized, message: "admin token required" },
-    });
   });
 
   // --- consistent error handling ------------------------------------------

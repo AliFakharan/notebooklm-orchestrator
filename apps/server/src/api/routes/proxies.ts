@@ -179,9 +179,19 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
   app.delete<{ Params: { id: string } }>("/api/proxies/:id", async (req, reply) => {
     const node = ctx.proxies.get(req.params.id);
     if (!node) throw new ApiError(ApiCodes.notFound, "node not found", 404);
-    // Remove the vaulted secret too.
-    ctx.vault.delete(node.config.uuidSecretRef);
     ctx.proxies.delete(req.params.id);
+    // Remove the vaulted secret ONLY if no remaining node references the same
+    // secret. Nodes frequently share one UUID (same provider key), so an
+    // unconditional delete would wipe the key for every sibling node.
+    const ref = node.config.uuidSecretRef;
+    const stillUsed = ctx.proxies.list().some((n) => n.config.uuidSecretRef === ref);
+    if (!stillUsed) {
+      try {
+        ctx.vault.delete(ref);
+      } catch {
+        // already gone — harmless
+      }
+    }
     return reply.code(204).send();
   });
 

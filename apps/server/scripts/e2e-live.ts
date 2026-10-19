@@ -51,7 +51,6 @@ const base = (arg("base") ?? "http://127.0.0.1:4870").replace(/\/$/, "");
 const timeoutMin = Number(arg("timeout-min", "40"));
 const preferredAccount = arg("account");
 const preferredNode = arg("node");
-const token = process.env.NLO_ADMIN_TOKEN || arg("token");
 
 const PASS = "✓ PASS";
 const FAIL = "✗ FAIL";
@@ -75,9 +74,8 @@ async function api(
   path: string,
   body?: unknown,
 ): Promise<{ status: number; json: unknown }> {
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   let payload: BodyInit | undefined;
+  const headers: Record<string, string> = {};
   if (body !== undefined) {
     headers["Content-Type"] = "application/json";
     payload = JSON.stringify(body);
@@ -273,7 +271,6 @@ async function main() {
   form.append("audio", new Blob([fileBytes], { type: mediaType }), path.basename(absAudio));
   const sub = await fetch(base + "/api/jobs", {
     method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   });
   const subj = (await sub.json()) as { id?: string; error?: string };
