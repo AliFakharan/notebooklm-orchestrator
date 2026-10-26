@@ -520,6 +520,40 @@ describe("proxies", () => {
       await ctx2.close();
     }
   });
+
+  it("per-node health response carries the persisted health row (UI merge)", async () => {
+    // Isolated context: no xray binary -> every staged check fails fast
+    // without network I/O; what matters here is the RESPONSE SHAPE: the UI
+    // merges `node` straight into its list, so it must include `health`
+    // (a bare maskNode would wipe the row back to "never checked").
+    const ctx3 = await makeAppContext({
+      NLO_HEALTH_ALLOWLIST: "93.184.216.34:443",
+      NLO_PROXY_RUNTIME: "xray",
+    });
+    const app3 = await buildApp(ctx3);
+    await app3.ready();
+    try {
+      const n = addNode(ctx3.proxies, ctx3.vault, "shape-a");
+      const res = await app3.inject({
+        method: "POST",
+        url: `/api/proxies/${n.id}/health`,
+        headers: auth,
+        payload: { target: "egress" },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json() as {
+        node: { health?: { lastCheckedAt?: string | null; ok?: boolean } | null };
+      };
+      expect(body.node.health).toBeTruthy();
+      expect(body.node.health!.lastCheckedAt).toBeTypeOf("string");
+      // The failure is real (no xray), so the merged row shows "no answer",
+      // not "never tested".
+      expect(body.node.health!.ok).toBe(false);
+    } finally {
+      await app3.close();
+      await ctx3.close();
+    }
+  });
 });
 
 describe("provider info", () => {

@@ -358,7 +358,12 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
     const result = await ctx.proxyManager.runHealthCheck(node.id, dest);
     const refreshed = ctx.proxies.get(node.id);
     if (!refreshed) throw new ApiError(ApiCodes.notFound, "node not found", 404);
-    return { node: maskNode(refreshed), ...result };
+    // Include the persisted health row so the UI can merge the response
+    // straight into its list (a bare maskNode would carry no health).
+    return {
+      node: { ...maskNode(refreshed), health: ctx.proxies.health(refreshed.id) },
+      ...result,
+    };
   });
 
   // Connectivity test through the tunnel (no egress IP assertion).

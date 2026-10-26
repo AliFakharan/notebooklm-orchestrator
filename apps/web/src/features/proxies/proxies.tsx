@@ -124,8 +124,11 @@ export function ProxiesPage() {
       try {
         const res: ProxyHealthResult = await proxyHealthCheck(n.id, { target: "notebooklm" });
         if (!res.ok) bad += 1;
-        // The response carries the refreshed node (with its new health row).
-        setItems((l) => (l ? l.map((x) => (x.id === res.node.id ? res.node : x)) : l));
+        // The response carries the refreshed node (with its new health row);
+        // keep the old health if a response ever lacks it.
+        setItems((l) =>
+          l ? l.map((x) => (x.id === res.node.id ? mergeHealth(res.node, x) : x)) : l,
+        );
       } catch (e) {
         bad += 1;
         // Transport-level failure (server down, timeout): record it as a
@@ -288,12 +291,8 @@ export function ProxiesPage() {
                   />
                 </TableHead>
                 <TableHead>نود</TableHead>
-                <TableHead dir="ltr" className="text-start">
-                  سرور
-                </TableHead>
-                <TableHead dir="ltr" className="text-start tabular-nums">
-                  پینگ (NotebookLM)
-                </TableHead>
+                <TableHead>سرور</TableHead>
+                <TableHead className="tabular-nums">پینگ (NotebookLM)</TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
@@ -319,10 +318,10 @@ export function ProxiesPage() {
                       {n.config.name}
                     </span>
                   </TableCell>
-                  <TableCell dir="ltr" className="text-start text-xs">
+                  <TableCell dir="ltr" className="text-xs">
                     {n.config.server}:{fa(n.config.port)}
                   </TableCell>
-                  <TableCell dir="ltr" className="text-start">
+                  <TableCell>
                     <PingCell node={n} checking={busyId === n.id || checkingIds.has(n.id)} />
                   </TableCell>
                   <TableCell>
@@ -337,7 +336,9 @@ export function ProxiesPage() {
                           const res = await proxyHealthCheck(n.id, { target: "notebooklm" });
                           // Merge the refreshed node in place (re-sorts too).
                           setItems((l) =>
-                            l ? l.map((x) => (x.id === res.node.id ? res.node : x)) : l,
+                            l
+                              ? l.map((x) => (x.id === res.node.id ? mergeHealth(res.node, x) : x))
+                              : l,
                           );
                           toast({
                             title: res.ok ? `پینگ ${fa(res.latencyMs ?? 0)} ms` : "پینگ ناموفق بود",
@@ -396,7 +397,7 @@ function PingCell({ node, checking }: { node: MaskedProxyNode; checking: boolean
     return <span className="text-xs text-muted-foreground">تست نشده</span>;
   }
   const label = (
-    <span className="flex items-center justify-start gap-1.5 text-xs tabular-nums">
+    <span className="flex items-center justify-end gap-1.5 text-xs tabular-nums">
       <span
         className={`size-2 rounded-full ${
           !h.ok
@@ -542,6 +543,15 @@ function ImportDialog({
       </div>
     </Dialog>
   );
+}
+
+/**
+ * Merge a refreshed node from a health response into a row, keeping the
+ * row's health if the response carries none (defensive: never wipe a real
+ * health row into "تست نشده").
+ */
+function mergeHealth(next: MaskedProxyNode, prev: MaskedProxyNode): MaskedProxyNode {
+  return next.health ? next : { ...next, health: prev.health };
 }
 
 function errMessage(err: unknown): string {
