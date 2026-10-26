@@ -3,6 +3,7 @@ import {
   buildVlessUri,
   maskUuid,
   parseVlessUri,
+  parseVlessUriList,
   redactVlessUri,
   VlessUriError,
 } from "../src/vless-uri.js";
@@ -68,6 +69,45 @@ describe("parseVlessUri", () => {
     const rebuilt = buildVlessUri(config, UUID);
     const { config: c2 } = parseVlessUri(rebuilt);
     expect(c2).toEqual(config);
+  });
+});
+
+describe("parseVlessUriList", () => {
+  const uri = (host: string, name: string) =>
+    `vless://${UUID}@${host}:443?security=tls&type=ws&path=%2Fx&fp=#${encodeURIComponent(name)}`;
+
+  it("parses a multi-line provider share list, line by line", () => {
+    const text = `${uri("a.example.com", "نود 1")}\n${uri("b.example.com", "نود 2")}\n`;
+    const lines = parseVlessUriList(text);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]!.line).toBe(1);
+    expect(lines[0]!.config?.server).toBe("a.example.com");
+    expect(lines[0]!.config?.name).toBe("نود 1");
+    expect(lines[1]!.line).toBe(2);
+    expect(lines[1]!.config?.server).toBe("b.example.com");
+  });
+
+  it("reports invalid lines individually instead of throwing", () => {
+    const text = `${uri("a.example.com", "ok")}
+not-a-uri
+vless://no-uuid@x.com:443
+${uri("c.example.com", "ok2")}`;
+    const lines = parseVlessUriList(text);
+    expect(lines).toHaveLength(4);
+    expect(lines[0]!.config).toBeDefined();
+    expect(lines[1]!.error).toBeTruthy();
+    expect(lines[1]!.line).toBe(2);
+    expect(lines[2]!.error).toMatch(/UUID/);
+    expect(lines[3]!.config).toBeDefined();
+  });
+
+  it("ignores blank lines/whitespace and preserves order", () => {
+    const text = `
+${uri("a.example.com", "1")}
+   ${uri("b.example.com", "2")}
+`;
+    const lines = parseVlessUriList(text);
+    expect(lines.map((l) => l.config?.server)).toEqual(["a.example.com", "b.example.com"]);
   });
 });
 

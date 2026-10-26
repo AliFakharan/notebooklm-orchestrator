@@ -353,6 +353,27 @@ export function proxyCreateFromUri(input: {
   return request("/api/proxies", jsonInit("POST", input));
 }
 
+export interface ProxiesImportResult {
+  line: number;
+  server: string | null;
+  port: number | null;
+  status: "added" | "skipped" | "error";
+  node?: MaskedProxyNode;
+  reason?: string;
+  warnings?: string[];
+}
+
+/** Batch import of multiple vless:// URIs from a clipboard blob. */
+export function proxiesImport(input: { text: string; priority?: number }): Promise<{
+  total: number;
+  added: number;
+  skipped: number;
+  errors: number;
+  results: ProxiesImportResult[];
+}> {
+  return request("/api/proxies/import", jsonInit("POST", input));
+}
+
 export interface ManualProxyInput {
   name: string;
   server: string;

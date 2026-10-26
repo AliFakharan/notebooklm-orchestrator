@@ -1,6 +1,13 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { ApiError, ApiCodes, parseVlessUri, maskUuid, type ProxyNodeConfig } from "@nlo/shared";
+import {
+  ApiError,
+  ApiCodes,
+  parseVlessUri,
+  parseVlessUriList,
+  maskUuid,
+  type ProxyNodeConfig,
+} from "@nlo/shared";
 import type { AppContext } from "../../app-context.js";
 
 const manualNode = z.object({
@@ -43,6 +50,111 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
 
     const node = ctx.proxies.create(parsed.config, { priority: body.priority });
     return reply.code(201).send({ node: maskNode(node), warnings: parsed.warnings });
+  });
+
+  // Batch import from a clipboard blob: MULTIPLE vless:// URIs (one per
+  // line or whitespace-separated), the common provider share format.
+  // Each line is validated independently and reported back (never "throw
+  // on the first bad line"); duplicates are detected both within the blob
+  // and against existing nodes (by connection identity, not by the
+  // cosmetic display name).
+  app.post("/api/proxies/import", async (req, reply) => {
+    const body = z
+      .object({
+        text: z.string().min(1).max(1_000_000),
+        priority: z.number().int().min(0).max(10000).optional(),
+      })
+      .parse(req.body);
+
+    const lines = parseVlessUriList(body.text);
+    if (lines.length === 0) {
+      throw new ApiError(ApiCodes.validation, "no vless:// URIs found in the pasted text", 400);
+    }
+
+    const existing = new Map(ctx.proxies.list().map((n) => [identityKey(n.config), n.id]));
+    const seenInBlob = new Set<string>();
+    const results: {
+      line: number;
+      server: string | null;
+      port: number | null;
+      status: "added" | "skipped" | "error";
+      node?: ReturnType<typeof maskNode>;
+      reason?: string;
+      warnings?: string[];
+    }[] = [];
+    let added = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const l of lines) {
+      if (!l.config) {
+        errors += 1;
+        results.push({
+          line: l.line,
+          server: null,
+          port: null,
+          status: "error",
+          reason: l.error,
+        });
+        continue;
+      }
+      const c = l.config;
+      const key = identityKey(c);
+      if (existing.has(key)) {
+        skipped += 1;
+        results.push({
+          line: l.line,
+          server: c.server,
+          port: c.port,
+          status: "skipped",
+          reason: "already exists",
+        });
+        continue;
+      }
+      if (seenInBlob.has(key)) {
+        skipped += 1;
+        results.push({
+          line: l.line,
+          server: c.server,
+          port: c.port,
+          status: "skipped",
+          reason: "duplicate within pasted list",
+        });
+        continue;
+      }
+      try {
+        ctx.vault.put(c.uuidSecretRef, c.uuidSecretRef.replace(/^vless-uuid:/, ""), "vless-uuid");
+        const node = ctx.proxies.create(c, { priority: body.priority });
+        seenInBlob.add(key);
+        existing.set(key, node.id);
+        added += 1;
+        results.push({
+          line: l.line,
+          server: c.server,
+          port: c.port,
+          status: "added",
+          node: maskNode(node),
+          warnings: l.warnings,
+        });
+      } catch (err) {
+        errors += 1;
+        results.push({
+          line: l.line,
+          server: c.server,
+          port: c.port,
+          status: "error",
+          reason: err instanceof Error ? err.message : "create failed",
+        });
+      }
+    }
+
+    return reply.code(200).send({
+      total: lines.length,
+      added,
+      skipped,
+      errors,
+      results,
+    });
   });
 
   // Add manually (all fields provided; UUID still vaulted).
@@ -269,6 +381,11 @@ function destFromAllowlist(ctx: AppContext): { host: string; port: number } {
   if (!first) return { host: "api.ipify.org", port: 443 };
   const [host, portStr] = first.includes(":") ? first.split(":") : [first, "443"];
   return { host: (host as string).replace(/^\[|\]$/g, ""), port: Number(portStr) || 443 };
+}
+
+/** Connection-identity key: the fields that actually select the server. */
+function identityKey(c: ProxyNodeConfig): string {
+  return [c.server, c.port, c.transport, c.security, c.wsHost ?? "", c.wsPath ?? ""].join("|");
 }
 
 /** Mask a node: UUID shown only in masked form; never the secret value. */

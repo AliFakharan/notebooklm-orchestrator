@@ -344,6 +344,67 @@ describe("proxies", () => {
     expect(res.json().error.code).toBe("validation_error");
   });
 
+  it("batch-imports a multi-URI clipboard blob with per-line results and dedupe", async () => {
+    const u2 = "23333333-2323-4333-8333-555555555555";
+    const blob = [
+      `vless://${uuid}@203.0.113.20:443?security=tls&type=ws&path=%2Fa#node-a`,
+      "definitely-not-a-uri",
+      `vless://${u2}@203.0.113.21:443#node-b`,
+      // duplicate of the first line (same connection identity)
+      `vless://${uuid}@203.0.113.20:443?security=tls&type=ws&path=%2Fa#node-a-again`,
+    ].join("\n");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/proxies/import",
+      headers: auth,
+      payload: { text: blob },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      total: number;
+      added: number;
+      skipped: number;
+      errors: number;
+      results: { line: number; status: string; reason?: string }[];
+    };
+    expect(body.total).toBe(4);
+    expect(body.added).toBe(2);
+    expect(body.skipped).toBe(1);
+    expect(body.errors).toBe(1);
+    expect(body.results.map((r) => r.status)).toEqual(["added", "error", "added", "skipped"]);
+    // Per-line errors carry a real message, not a bare failure.
+    expect(body.results[1]!.reason).toBeTruthy();
+    // Raw UUIDs never appear in the response.
+    expect(JSON.stringify(body)).not.toContain(uuid);
+    expect(JSON.stringify(body)).not.toContain(u2);
+    // Both secrets are vaulted.
+    expect(ctx.vault.has(`vless-uuid:${uuid}`)).toBe(true);
+    expect(ctx.vault.has(`vless-uuid:${u2}`)).toBe(true);
+
+    // Re-importing the same blob skips everything (identity dedupe vs DB).
+    const again = await app.inject({
+      method: "POST",
+      url: "/api/proxies/import",
+      headers: auth,
+      payload: { text: blob },
+    });
+    expect(again.statusCode).toBe(200);
+    const body2 = again.json() as { added: number; skipped: number };
+    expect(body2.added).toBe(0);
+    expect(body2.skipped).toBe(3);
+
+    // Empty / garbage input is a validation error, not a silent success.
+    const empty = await app.inject({
+      method: "POST",
+      url: "/api/proxies/import",
+      headers: auth,
+      payload: { text: "   \n  " },
+    });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json().error.code).toBe("validation_error");
+  });
+
   it("lists nodes with masked config and deletes (removing the vault secret)", async () => {
     const created = await app.inject({
       method: "POST",

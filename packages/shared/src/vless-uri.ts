@@ -184,6 +184,35 @@ function decodeURIComponentSafe(value: string): string {
 }
 
 /**
+ * Parse a clipboard blob containing MULTIPLE vless:// URIs (one per line,
+ * or whitespace-separated — provider share lists are line-separated).
+ *
+ * Never throws: every line is validated independently and reported, so the
+ * caller can show per-line errors instead of failing the whole batch.
+ */
+export interface ParsedVlessUriLine {
+  /** 1-based line number within the input text. */
+  line: number;
+  uri: string;
+  config?: ProxyNodeConfig;
+  warnings?: string[];
+  /** Present (and config absent) when the line is invalid. */
+  error?: string;
+}
+
+export function parseVlessUriList(text: string): ParsedVlessUriLine[] {
+  const uris = text.split(/\s+/).filter((u) => u.length > 0);
+  return uris.map((uri, i) => {
+    try {
+      const { config, warnings } = parseVlessUri(uri);
+      return { line: i + 1, uri, config, warnings };
+    } catch (err) {
+      return { line: i + 1, uri, error: err instanceof Error ? err.message : "invalid URI" };
+    }
+  });
+}
+
+/**
  * Build a VLESS URI from a normalized config + UUID.
  * Used for import/export round-trips and tests.
  */
