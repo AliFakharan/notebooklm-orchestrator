@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Cable, ClipboardPaste, RefreshCw, Trash2, Wifi } from "lucide-react";
+import { Activity, Cable, ClipboardPaste, Trash2, Wifi } from "lucide-react";
 import {
-  proxyDelete,
+  proxyDeleteMany,
   proxyHealthCheck,
   proxyRuntimeStatus,
   proxiesImport,
   proxiesList,
-  proxiesPingAll,
   type MaskedProxyNode,
   type ProxiesImportResult,
+  type ProxyHealthResult,
   type ProxyRuntimeStatus,
 } from "@/lib/api";
 import { fa } from "@/lib/utils";
@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog } from "@/components/ui/dialog";
 import { AlertDialog } from "@/components/ui/alert-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -43,9 +44,15 @@ export function ProxiesPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
-  const [deleting, setDeleting] = useState<MaskedProxyNode | null>(null);
   const [pinging, setPinging] = useState(false);
+  /** Node ids currently being checked (rows show "در حال تست…"). */
+  const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
   const [lastPing, setLastPing] = useState<{ at: string; target: string } | null>(null);
+
+  // Table multi-select for batch delete.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [runtime, setRuntime] = useState<ProxyRuntimeStatus | null>(null);
 
@@ -67,45 +74,97 @@ export function ProxiesPage() {
     void load();
   }, [load]);
 
-  const doDelete = async () => {
-    if (!deleting) return;
+  // Drop selection entries that no longer exist (deleted / reloaded list).
+  useEffect(() => {
+    if (!items) return;
+    setSelected((s) => {
+      const live = new Set(items.map((n) => n.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of s) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : s;
+    });
+  }, [items]);
+
+  const toggleAll = (on: boolean) => {
+    setSelected(on && items ? new Set(items.map((n) => n.id)) : new Set());
+  };
+
+  const doBatchDelete = async () => {
+    if (selected.size === 0) return;
+    const ids = [...selected];
+    setDeleting(true);
     try {
-      await proxyDelete(deleting.id);
-      setItems((l) => l?.filter((n) => n.id !== deleting.id) ?? null);
-      toast({ title: "نود حذف شد", variant: "success" });
-      setDeleting(null);
+      await proxyDeleteMany(ids);
+      setItems((l) => l?.filter((n) => !selected.has(n.id)) ?? null);
+      toast({ title: `${fa(ids.length)} نود حذف شد`, variant: "success" });
+      setSelected(new Set());
+      setConfirmDelete(false);
     } catch (err) {
       toast({ title: "حذف ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setDeleting(false);
     }
   };
 
-  /** Ping every node to notebooklm.google.com:443, then reload the list. */
+  /**
+   * Ping every node to notebooklm.google.com:443 with bounded concurrency.
+   * Runs the per-node health endpoint client-side (same staged, SSRF-guarded
+   * check the table button uses) and merges each result into the table the
+   * moment it lands — the list re-sorts after every completion instead of
+   * waiting for the slowest node.
+   */
   const doPingAll = async () => {
     if (!items || items.length === 0) return;
     setPinging(true);
-    try {
-      const res = await proxiesPingAll();
-      const bad = res.results.filter((r) => !r.ok).length;
-      setLastPing({ at: res.at, target: res.target });
-      toast({
-        title: `بررسی ${fa(res.results.length)} نود به مقصد ${res.target} تمام شد`,
-        description:
-          bad === 0
-            ? "همه نودها پاسخ دادند."
-            : `${fa(bad)} نود پاسخ ندادند؛ جزئیات را از ستون پینگ ببینید.`,
-        variant: bad === 0 ? "success" : "default",
-      });
-    } catch (err) {
-      toast({ title: "بررسی گروهی ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setPinging(false);
-      await load();
-    }
+    setCheckingIds(new Set(items.map((n) => n.id)));
+    const startedAt = new Date().toISOString();
+    let bad = 0;
+    let next = 0;
+    const runOne = async (n: MaskedProxyNode) => {
+      try {
+        const res: ProxyHealthResult = await proxyHealthCheck(n.id, { target: "notebooklm" });
+        if (!res.ok) bad += 1;
+        // The response carries the refreshed node (with its new health row).
+        setItems((l) => (l ? l.map((x) => (x.id === res.node.id ? res.node : x)) : l));
+      } catch {
+        bad += 1;
+        // Node stays on its previous state; the row just stops spinning.
+      } finally {
+        setCheckingIds((s) => {
+          const t = new Set(s);
+          t.delete(n.id);
+          return t;
+        });
+      }
+    };
+    const workers = Array.from({ length: Math.min(6, items.length) }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= items.length) return;
+        await runOne(items[i]!);
+      }
+    });
+    await Promise.all(workers);
+    setPinging(false);
+    setLastPing({ at: startedAt, target: "notebooklm.google.com:443" });
+    toast({
+      title: `بررسی ${fa(items.length)} نود تمام شد`,
+      description:
+        bad === 0
+          ? "همه نودها پاسخ دادند."
+          : `${fa(bad)} نود پاسخ ندادند؛ جزئیات را از ستون پینگ ببینید.`,
+      variant: bad === 0 ? "success" : "default",
+    });
   };
 
   /**
    * Display order: nodes that answered last, fastest ping first; nodes that
    * failed (or were never checked) go to the bottom, oldest failures first.
+   * Recomputed on every state change, so rows re-sort as pings complete.
    */
   const sorted = useMemo(() => {
     if (!items) return null;
@@ -125,6 +184,9 @@ export function ProxiesPage() {
     });
   }, [items]);
 
+  const allSelected = !!items && items.length > 0 && items.every((n) => selected.has(n.id));
+  const someSelected = selected.size > 0 && !allSelected;
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between">
@@ -139,15 +201,22 @@ export function ProxiesPage() {
           <Button
             variant="outline"
             size="sm"
+            disabled={selected.size === 0 || deleting}
+            onClick={() => setConfirmDelete(true)}
+          >
+            <Trash2 />
+            حذف انتخاب‌شده‌ها{selected.size > 0 ? ` (${fa(selected.size)})` : ""}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             disabled={pinging || !items || items.length === 0}
             onClick={() => void doPingAll()}
           >
             <Activity className={pinging ? "animate-pulse" : undefined} />
-            {pinging ? "در حال بررسی همه نودها…" : "تست پینگ همه نودها"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => void load()}>
-            <RefreshCw />
-            تازه‌سازی
+            {pinging
+              ? `در حال بررسی ${fa(checkingIds.size)} نود باقی‌مانده…`
+              : "تست پینگ همه نودها"}
           </Button>
           <Button size="sm" onClick={() => setImporting(true)}>
             <ClipboardPaste />
@@ -205,15 +274,36 @@ export function ProxiesPage() {
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-8">
+                  <Checkbox
+                    checked={allSelected ? true : someSelected ? "indeterminate" : false}
+                    onCheckedChange={(v) => toggleAll(v)}
+                    aria-label="انتخاب همه"
+                  />
+                </TableHead>
                 <TableHead>نود</TableHead>
-                <TableHead>سروور</TableHead>
+                <TableHead>سرور</TableHead>
                 <TableHead className="text-left tabular-nums">پینگ (NotebookLM)</TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {(sorted ?? items).map((n) => (
-                <TableRow key={n.id}>
+                <TableRow key={n.id} data-state={selected.has(n.id) ? "selected" : undefined}>
+                  <TableCell className="w-8">
+                    <Checkbox
+                      checked={selected.has(n.id)}
+                      onCheckedChange={(v) =>
+                        setSelected((s) => {
+                          const t = new Set(s);
+                          if (v) t.add(n.id);
+                          else t.delete(n.id);
+                          return t;
+                        })
+                      }
+                      aria-label={`انتخاب ${n.config.name}`}
+                    />
+                  </TableCell>
                   <TableCell>
                     <span className="block max-w-56 truncate text-start text-sm font-medium">
                       {n.config.name}
@@ -223,49 +313,40 @@ export function ProxiesPage() {
                     {n.config.server}:{fa(n.config.port)}
                   </TableCell>
                   <TableCell numeric>
-                    <PingCell node={n} checking={busyId === n.id} />
+                    <PingCell node={n} checking={busyId === n.id || checkingIds.has(n.id)} />
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label="تست پینگ"
-                        disabled={busyId === n.id}
-                        onClick={async () => {
-                          setBusyId(n.id);
-                          try {
-                            const res = await proxyHealthCheck(n.id, { target: "notebooklm" });
-                            await load();
-                            toast({
-                              title: res.ok
-                                ? `پینگ ${fa(res.latencyMs ?? 0)} ms`
-                                : "پینگ ناموفق بود",
-                              description: res.ok ? undefined : res.error,
-                              variant: res.ok ? "success" : "error",
-                            });
-                          } catch (e) {
-                            toast({
-                              title: "بررسی ناموفق بود",
-                              description: errMessage(e),
-                              variant: "error",
-                            });
-                          } finally {
-                            setBusyId(null);
-                          }
-                        }}
-                      >
-                        <Wifi className={busyId === n.id ? "animate-pulse" : undefined} />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label="حذف"
-                        onClick={() => setDeleting(n)}
-                      >
-                        <Trash2 />
-                      </Button>
-                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="تست پینگ"
+                      disabled={busyId === n.id}
+                      onClick={async () => {
+                        setBusyId(n.id);
+                        try {
+                          const res = await proxyHealthCheck(n.id, { target: "notebooklm" });
+                          // Merge the refreshed node in place (re-sorts too).
+                          setItems((l) =>
+                            l ? l.map((x) => (x.id === res.node.id ? res.node : x)) : l,
+                          );
+                          toast({
+                            title: res.ok ? `پینگ ${fa(res.latencyMs ?? 0)} ms` : "پینگ ناموفق بود",
+                            description: res.ok ? undefined : res.error,
+                            variant: res.ok ? "success" : "error",
+                          });
+                        } catch (e) {
+                          toast({
+                            title: "بررسی ناموفق بود",
+                            description: errMessage(e),
+                            variant: "error",
+                          });
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                    >
+                      <Wifi className={busyId === n.id ? "animate-pulse" : undefined} />
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -277,17 +358,13 @@ export function ProxiesPage() {
       <ImportDialog open={importing} onOpenChange={setImporting} onImported={() => void load()} />
 
       <AlertDialog
-        open={deleting !== null}
-        onOpenChange={(o) => !o && setDeleting(null)}
-        title="حذف نود"
-        description={
-          deleting
-            ? `نود «${deleting.config.name}» و رمز UUID آن از گاوصندوق حذف می‌شوند. این کار برگشت‌پذیر نیست.`
-            : undefined
-        }
+        open={confirmDelete}
+        onOpenChange={(o) => !o && !deleting && setConfirmDelete(false)}
+        title="حذف نودهای انتخاب‌شده"
+        description={`${fa(selected.size)} نود و رمزهای UUID آن‌ها (هرکجا دیگر استفاده نشوند) از گاوصندوق حذف می‌شوند. این کار برگشت‌پذیر نیست.`}
         confirmText="حذف"
         destructive
-        onConfirm={() => void doDelete()}
+        onConfirm={() => void doBatchDelete()}
       />
     </Card>
   );

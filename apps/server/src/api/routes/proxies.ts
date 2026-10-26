@@ -288,6 +288,28 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
     return maskNode(node);
   });
 
+  // Batch delete (table multi-select in the UI). Same vault hygiene as the
+  // single-delete: a secret is removed only when no remaining node refs it.
+  app.delete("/api/proxies", async (req, reply) => {
+    const body = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) }).parse(req.body);
+    let deleted = 0;
+    for (const id of new Set(body.ids)) {
+      const node = ctx.proxies.get(id);
+      if (!node) continue;
+      ctx.proxies.delete(id);
+      deleted += 1;
+      const ref = node.config.uuidSecretRef;
+      if (!ctx.proxies.list().some((n) => n.config.uuidSecretRef === ref)) {
+        try {
+          ctx.vault.delete(ref);
+        } catch {
+          // already gone — harmless
+        }
+      }
+    }
+    return reply.code(200).send({ deleted });
+  });
+
   app.delete<{ Params: { id: string } }>("/api/proxies/:id", async (req, reply) => {
     const node = ctx.proxies.get(req.params.id);
     if (!node) throw new ApiError(ApiCodes.notFound, "node not found", 404);

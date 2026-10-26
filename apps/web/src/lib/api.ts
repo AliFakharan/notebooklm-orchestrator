@@ -425,6 +425,11 @@ export function proxyDelete(id: string): Promise<void> {
   return request(`/api/proxies/${id}`, { method: "DELETE" });
 }
 
+/** Delete many nodes at once (table multi-select). Returns how many were removed. */
+export function proxyDeleteMany(ids: string[]): Promise<{ deleted: number }> {
+  return request("/api/proxies", jsonInit("DELETE", { ids }));
+}
+
 export function proxyValidate(id: string): Promise<{ ok: boolean; issues: string[] }> {
   return request(`/api/proxies/${id}/validate`, { method: "POST" });
 }

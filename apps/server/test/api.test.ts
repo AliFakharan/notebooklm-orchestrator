@@ -428,6 +428,52 @@ describe("proxies", () => {
     expect(ctx.vault.has(`vless-uuid:${uuid}`)).toBe(false);
   });
 
+  it("batch-deletes selected nodes and cleans up unreferenced vault secrets", async () => {
+    const u2 = "44444444-4444-4444-4444-444444444444";
+    const a = await app.inject({
+      method: "POST",
+      url: "/api/proxies",
+      headers: auth,
+      payload: { uri: `vless://${uuid}@203.0.113.30:443#del-a` },
+    });
+    const b = await app.inject({
+      method: "POST",
+      url: "/api/proxies",
+      headers: auth,
+      payload: { uri: `vless://${u2}@203.0.113.31:443#del-b` },
+    });
+    expect(a.statusCode).toBe(201);
+    expect(b.statusCode).toBe(201);
+    const idA = (a.json().node as { id: string }).id;
+    const idB = (b.json().node as { id: string }).id;
+
+    const res = await app.inject({
+      method: "DELETE",
+      url: "/api/proxies",
+      headers: auth,
+      payload: { ids: [idA, idB, "node_does_not_exist"] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ deleted: 2 });
+
+    const list = await app.inject({ method: "GET", url: "/api/proxies", headers: auth });
+    const ids = (list.json() as { id: string }[]).map((n) => n.id);
+    expect(ids).not.toContain(idA);
+    expect(ids).not.toContain(idB);
+    // Both secrets had no remaining references — vault cleaned up.
+    expect(ctx.vault.has(`vless-uuid:${uuid}`)).toBe(false);
+    expect(ctx.vault.has(`vless-uuid:${u2}`)).toBe(false);
+
+    // Empty id list is rejected, not a silent no-op.
+    const empty = await app.inject({
+      method: "DELETE",
+      url: "/api/proxies",
+      headers: auth,
+      payload: { ids: [] },
+    });
+    expect(empty.statusCode).toBe(400);
+  });
+
   it("ping-all checks every node and persists per-node health rows", async () => {
     // Isolated context: fixed-IP allowlist (no notebooklm.google.com) so
     // destination selection is deterministic; xray runtime WITHOUT its
