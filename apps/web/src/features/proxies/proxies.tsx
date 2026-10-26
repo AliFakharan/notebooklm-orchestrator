@@ -7,7 +7,6 @@ import {
   proxiesImport,
   proxiesList,
   type MaskedProxyNode,
-  type ProxiesImportResult,
   type ProxyHealthResult,
   type ProxyRuntimeStatus,
 } from "@/lib/api";
@@ -29,7 +28,6 @@ import {
 } from "@/components/ui/table";
 import { EmptyState } from "@/components/shared/empty-state";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { RelativeTime } from "@/components/shared/relative-time";
 import { useToast } from "@/components/ui/toast";
 
 /**
@@ -47,7 +45,6 @@ export function ProxiesPage() {
   const [pinging, setPinging] = useState(false);
   /** Node ids currently being checked (rows show "در حال تست…"). */
   const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
-  const [lastPing, setLastPing] = useState<{ at: string; target: string } | null>(null);
 
   // Table multi-select for batch delete.
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -121,7 +118,6 @@ export function ProxiesPage() {
     if (!items || items.length === 0) return;
     setPinging(true);
     setCheckingIds(new Set(items.map((n) => n.id)));
-    const startedAt = new Date().toISOString();
     let bad = 0;
     let next = 0;
     const runOne = async (n: MaskedProxyNode) => {
@@ -130,9 +126,32 @@ export function ProxiesPage() {
         if (!res.ok) bad += 1;
         // The response carries the refreshed node (with its new health row).
         setItems((l) => (l ? l.map((x) => (x.id === res.node.id ? res.node : x)) : l));
-      } catch {
+      } catch (e) {
         bad += 1;
-        // Node stays on its previous state; the row just stops spinning.
+        // Transport-level failure (server down, timeout): record it as a
+        // genuine "no answer" so the cell shows بدون پاسخ instead of
+        // silently reverting to the previous check.
+        const at = new Date().toISOString();
+        setItems((l) =>
+          l
+            ? l.map((x) =>
+                x.id === n.id
+                  ? {
+                      ...x,
+                      health: {
+                        ...x.health,
+                        nodeId: n.id,
+                        lastCheckedAt: at,
+                        ok: false,
+                        egressIp: null,
+                        latencyMs: null,
+                        error: errMessage(e),
+                      },
+                    }
+                  : x,
+              )
+            : l,
+        );
       } finally {
         setCheckingIds((s) => {
           const t = new Set(s);
@@ -150,7 +169,6 @@ export function ProxiesPage() {
     });
     await Promise.all(workers);
     setPinging(false);
-    setLastPing({ at: startedAt, target: "notebooklm.google.com:443" });
     toast({
       title: `بررسی ${fa(items.length)} نود تمام شد`,
       description:
@@ -220,18 +238,12 @@ export function ProxiesPage() {
           </Button>
           <Button size="sm" onClick={() => setImporting(true)}>
             <ClipboardPaste />
-            افزودن از کلیپ‌بورد
+            افزودن نود
           </Button>
         </div>
       </CardHeader>
       <CardContent>
         {error && <ErrorBanner message={error} onRetry={() => void load()} />}
-        {lastPing && (
-          <p className="mb-2 text-xs text-muted-foreground">
-            آخرین تست پینگ گروهی به مقصد <span dir="ltr">{lastPing.target}</span> :{" "}
-            <RelativeTime iso={lastPing.at} />
-          </p>
-        )}
 
         {runtime && runtime.state !== "available" && (
           <p className="mb-3 rounded-field border border-warning/40 bg-warning/10 p-3 text-xs leading-6">
@@ -262,13 +274,7 @@ export function ProxiesPage() {
           <EmptyState
             icon={<Cable className="size-8" />}
             title="نود VLESS تعریف نشده"
-            description="لیست vless:// خود (مثلا از اپ پراکسی) را در کلیپ‌بورد کپی کنید و با دکمه «افزودن از کلیپ‌بورد» بفرستید."
-            action={
-              <Button size="sm" onClick={() => setImporting(true)}>
-                <ClipboardPaste />
-                افزودن از کلیپ‌بورد
-              </Button>
-            }
+            description="لیست vless:// خود را در کلیپ‌بورد کپی کنید و با دکمه «افزودن نود» بفرستید."
           />
         ) : (
           <Table>
@@ -282,8 +288,12 @@ export function ProxiesPage() {
                   />
                 </TableHead>
                 <TableHead>نود</TableHead>
-                <TableHead>سرور</TableHead>
-                <TableHead className="text-left tabular-nums">پینگ (NotebookLM)</TableHead>
+                <TableHead dir="ltr" className="text-start">
+                  سرور
+                </TableHead>
+                <TableHead dir="ltr" className="text-start tabular-nums">
+                  پینگ (NotebookLM)
+                </TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
@@ -309,10 +319,10 @@ export function ProxiesPage() {
                       {n.config.name}
                     </span>
                   </TableCell>
-                  <TableCell className="text-xs" dir="ltr">
+                  <TableCell dir="ltr" className="text-start text-xs">
                     {n.config.server}:{fa(n.config.port)}
                   </TableCell>
-                  <TableCell numeric>
+                  <TableCell dir="ltr" className="text-start">
                     <PingCell node={n} checking={busyId === n.id || checkingIds.has(n.id)} />
                   </TableCell>
                   <TableCell>
@@ -361,7 +371,7 @@ export function ProxiesPage() {
         open={confirmDelete}
         onOpenChange={(o) => !o && !deleting && setConfirmDelete(false)}
         title="حذف نودهای انتخاب‌شده"
-        description={`${fa(selected.size)} نود و رمزهای UUID آن‌ها (هرکجا دیگر استفاده نشوند) از گاوصندوق حذف می‌شوند. این کار برگشت‌پذیر نیست.`}
+        description={`${fa(selected.size)} نود و رمزهای UUID آن‌ها از گاوصندوق حذف می‌شوند. این کار برگشت‌پذیر نیست.`}
         confirmText="حذف"
         destructive
         onConfirm={() => void doBatchDelete()}
@@ -386,7 +396,7 @@ function PingCell({ node, checking }: { node: MaskedProxyNode; checking: boolean
     return <span className="text-xs text-muted-foreground">تست نشده</span>;
   }
   const label = (
-    <span className="flex items-center justify-end gap-1.5 text-xs tabular-nums">
+    <span className="flex items-center justify-start gap-1.5 text-xs tabular-nums">
       <span
         className={`size-2 rounded-full ${
           !h.ok
@@ -428,19 +438,11 @@ function ImportDialog({
   const [text, setText] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{
-    total: number;
-    added: number;
-    skipped: number;
-    errors: number;
-    results: ProxiesImportResult[];
-  } | null>(null);
 
   // Fill from the clipboard when the dialog opens (permission-gated; the
   // user can always paste manually into the textarea).
   useEffect(() => {
     if (!open) return;
-    setResult(null);
     setErr(null);
     const clip = navigator.clipboard;
     if (clip && "readText" in clip) {
@@ -464,30 +466,30 @@ function ImportDialog({
     }
     setBusy(true);
     setErr(null);
-    setResult(null);
     try {
       const res = await proxiesImport({ text });
-      setResult(res);
+      onImported();
       if (res.added > 0) {
+        // At least one node was added: the list already shows them, so the
+        // dialog closes itself.
+        close();
         toast({
           title: `${fa(res.added)} نود افزوده شد`,
           description:
             res.skipped > 0 || res.errors > 0
-              ? `${fa(res.skipped)} تکراری رد شد، ${fa(res.errors)} خطا داشت — جزئیات زیر.`
+              ? `${fa(res.skipped)} تکراری رد شد، ${fa(res.errors)} خطا داشت.`
               : undefined,
           variant: res.errors > 0 ? "default" : "success",
         });
-      } else {
-        toast({
-          title: "هیچ نود جدیدی افزوده نشد",
-          description:
-            res.errors > 0
-              ? `${fa(res.errors)} خطا داشت — جزئیات زیر.`
-              : "همه‌ی کانفیگ‌ها تکراری بودند.",
-          variant: "error",
-        });
+        return;
       }
-      onImported();
+      // Nothing was added — keep the dialog open so the user can see why.
+      toast({
+        title: "هیچ نود جدیدی افزوده نشد",
+        description:
+          res.errors > 0 ? `${fa(res.errors)} خطا داشت.` : "همه‌ی کانفیگ‌ها تکراری بودند.",
+        variant: "error",
+      });
     } catch (e) {
       setErr(errMessage(e));
     } finally {
@@ -498,7 +500,6 @@ function ImportDialog({
   const close = () => {
     if (busy) return;
     setText("");
-    setResult(null);
     setErr(null);
     onOpenChange(false);
   };
@@ -507,8 +508,8 @@ function ImportDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => !o && close()}
-      title="افزودن نود از کلیپ‌بورد"
-      description="لیست کانفیگ vless:// (مثلا از اپ پراکسی) را کپی کنید؛ هر خط جداگانه اعتبارسنجی می‌شود و تکراری‌ها خودکار رد می‌شوند."
+      title="افزودن نود"
+      description="لیست کانفیگ vless:// را paste کنید؛ هر خط جداگانه اعتبارسنجی می‌شود و تکراری‌ها خودکار رد می‌شوند."
       footer={
         <>
           <Button disabled={busy || !text.trim()} onClick={() => void submit()}>
@@ -535,55 +536,9 @@ function ImportDialog({
           />
           {err && <p className="mt-1 text-xs font-medium text-destructive">{err}</p>}
           <p className="mt-1 text-xs text-muted-foreground">
-            {lineCount > 0
-              ? `${fa(lineCount)} URI شناسایی شد. اگر کلیپ‌بورد اجازه نداد خودکار پر شود، دستی Ctrl+V بزنید.`
-              : "هنوز متنی وارد نشده است."}
+            {lineCount > 0 ? `${fa(lineCount)} URI شناسایی شد.` : "هنوز متنی وارد نشده است."}
           </p>
         </div>
-
-        {result && (
-          <div className="max-h-48 overflow-auto rounded-field border border-border bg-field/50 p-3">
-            <p className="mb-2 text-xs font-medium">
-              نتیجه: از {fa(result.total)} URI — {fa(result.added)} افزوده شد، {fa(result.skipped)}{" "}
-              تکراری رد شد، {fa(result.errors)} خطا داشت.
-            </p>
-            <ul className="flex flex-col gap-1 text-xs">
-              {result.results.map((r) => (
-                <li key={r.line} className="flex items-center gap-2">
-                  <span
-                    className={`size-2 shrink-0 rounded-full ${
-                      r.status === "added"
-                        ? "bg-success"
-                        : r.status === "skipped"
-                          ? "bg-muted-foreground/50"
-                          : "bg-destructive"
-                    }`}
-                    aria-hidden
-                  />
-                  <span className="w-12 shrink-0 tabular-nums text-muted-foreground">
-                    خط {fa(r.line)}
-                  </span>
-                  {r.server && (
-                    <span className="shrink-0" dir="ltr">
-                      {r.server}:{fa(r.port ?? 0)}
-                    </span>
-                  )}
-                  <span
-                    className={r.status === "error" ? "text-destructive" : "text-muted-foreground"}
-                  >
-                    {r.status === "added"
-                      ? "افزوده شد"
-                      : r.status === "skipped"
-                        ? r.reason === "duplicate within pasted list"
-                          ? "تکراری در همین لیست"
-                          : "قبلا وجود دارد"
-                        : (r.reason ?? "خطا")}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
     </Dialog>
   );
