@@ -31,3 +31,7 @@ Thumbs.db
 
 # vendor (downloaded at runtime, never in git)
 vendor/
+
+# python
+__pycache__/
+*.pyc
