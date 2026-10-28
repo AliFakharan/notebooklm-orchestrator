@@ -6,13 +6,11 @@ import type { AppContext } from "../../app-context.js";
 import { PythonWorkerProvider } from "../../providers/python-worker/python-worker-provider.js";
 
 const createAccount = z.object({
-  label: z.string().min(1).max(80),
-  displayEmail: z.string().max(200).optional().default(""),
+  email: z.string().min(3).max(200).email(),
 });
 
 const updateAccount = z.object({
-  label: z.string().min(1).max(80).optional(),
-  displayEmail: z.string().max(200).optional(),
+  displayEmail: z.string().min(3).max(200).email().optional(),
   status: z
     .enum(["ACTIVE", "DEGRADED", "RATE_LIMITED", "AUTH_REQUIRED", "DISABLED", "UNKNOWN"])
     .optional(),
@@ -23,11 +21,20 @@ const updateAccount = z.object({
 export function registerAccountRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.post("/api/accounts", async (req, reply) => {
     const body = createAccount.parse(req.body);
-    const account = ctx.accounts.create({
-      label: body.label,
-      displayEmail: body.displayEmail,
-      authSecretRef: null, // no secrets via this endpoint
-    });
+    let account;
+    try {
+      account = ctx.accounts.create({
+        email: body.email,
+        authSecretRef: null, // no secrets via this endpoint
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("already exists")) {
+        // Do not echo the raw message (nor the email): a clean, generic 409.
+        throw new ApiError(ApiCodes.conflict, "email is already registered", 409);
+      }
+      throw e;
+    }
     ctx.accounts.recordError(account.id, "", "AUTH_REQUIRED"); // start unauthed
     // Reset to UNKNOWN-ish: mark as needing auth.
     return reply.code(201).send(sanitizeAccount(account));
@@ -43,7 +50,16 @@ export function registerAccountRoutes(app: FastifyInstance, ctx: AppContext): vo
 
   app.patch<{ Params: { id: string } }>("/api/accounts/:id", async (req) => {
     const body = updateAccount.parse(req.body);
-    const a = ctx.accounts.update(req.params.id, body);
+    let a;
+    try {
+      a = ctx.accounts.update(req.params.id, body);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("already exists")) {
+        throw new ApiError(ApiCodes.conflict, "email is already registered", 409);
+      }
+      throw e;
+    }
     return sanitizeAccount(a);
   });
 

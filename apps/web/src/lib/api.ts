@@ -183,7 +183,8 @@ export function jobCreate(input: {
   prompt: string;
   title?: string;
   audio: File | null;
-  preferredAccountId?: string | null;
+  /** Required: the user always picks which Google account creates the notebook. */
+  preferredAccountId: string;
   preferredNodeId?: string | null;
 }): Promise<CreateJobResult> {
   const fd = new FormData();
@@ -276,13 +277,13 @@ export function accountGet(id: string): Promise<Account> {
   return request(`/api/accounts/${id}`);
 }
 
-export function accountCreate(input: { label: string; displayEmail?: string }): Promise<Account> {
+export function accountCreate(input: { email: string }): Promise<Account> {
   return request("/api/accounts", jsonInit("POST", input));
 }
 
 export function accountUpdate(
   id: string,
-  patch: Partial<Pick<Account, "label" | "displayEmail" | "status" | "enabled" | "quotaNote">>,
+  patch: Partial<Pick<Account, "displayEmail" | "status" | "enabled" | "quotaNote">>,
 ): Promise<Account> {
   return request(`/api/accounts/${id}`, jsonInit("PATCH", patch));
 }
@@ -556,51 +557,6 @@ export function sessionGet(accountId: string): Promise<SessionAccountView> {
   return request(`/api/sessions/${accountId}`);
 }
 
-/** Start interactive browser login (blocks until sign-in completes or times out). */
-export function sessionLogin(
-  accountId: string,
-  opts: {
-    timeoutSec?: number;
-    headless?: boolean;
-    browser?: "chromium" | "chrome" | "msedge";
-  } = {},
-): Promise<{ session: AuthSessionView; email: string | null }> {
-  return request(`/api/sessions/${accountId}/login`, jsonInit("POST", opts));
-}
-
-/**
- * Browsers the server allowlists as cookie sources for session import.
- * Chromium-family profiles can be targeted with "name::Profile" (e.g.
- * "chrome::Profile 1"); the base name must be in this list.
- */
-export const BROWSER_COOKIE_OPTIONS = [
-  "auto",
-  "chrome",
-  "firefox",
-  "chromium",
-  "brave",
-  "edge",
-  "opera",
-  "vivaldi",
-  "librewolf",
-  "zen",
-  "cachy",
-] as const;
-
-/**
- * Import Google cookies from an installed, non-automated browser. This is the
- * supported path when Google rejects the app's automated Playwright browser
- * ("may not be secure"): sign in with your normal browser, then let the app
- * copy the session locally. The server verifies the result against the real
- * service before reporting success.
- */
-export function sessionBrowserImport(
-  accountId: string,
-  body: { browser: string; account?: string; timeoutSec?: number },
-): Promise<{ session: AuthSessionView; email: string | null; routingNote?: string }> {
-  return request(`/api/sessions/${accountId}/browser-import`, jsonInit("POST", body));
-}
-
 export interface SessionVerifyResult {
   ok: boolean;
   email: string | null;
@@ -620,9 +576,16 @@ export function sessionRefresh(accountId: string): Promise<SessionVerifyResult> 
   return request(`/api/sessions/${accountId}/refresh`, { method: "POST" });
 }
 
+/**
+ * Import the account's session by PASTING cookies copied from the user's own
+ * browser (the only auth path). Accepted text: Playwright storage-state JSON,
+ * a JSON cookie array (Cookie-Editor export), or Netscape cookies.txt
+ * (Get-cookies.txt export). The server parses, filters to google.com cookies,
+ * stores 0600, and verifies against the real service.
+ */
 export function sessionImport(
   accountId: string,
-  body: { base64?: string; serverPath?: string },
+  body: { cookies?: string; base64?: string; serverPath?: string },
 ): Promise<SessionVerifyResult> {
   return request(`/api/sessions/${accountId}/import`, jsonInit("POST", body));
 }

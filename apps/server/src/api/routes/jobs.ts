@@ -55,13 +55,23 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
       throw new ApiError(ApiCodes.validation, "prompt is required", 400);
     }
 
-    const preferredAccountId = fields.preferredAccountId || null;
+    // A job MUST name its Google account explicitly — there is no "automatic"
+    // account selection (the user decides which identity creates the notebook).
+    const preferredAccountId = (fields.preferredAccountId ?? "").trim() || null;
     const preferredNodeId = fields.preferredNodeId || null;
     const title = (fields.title ?? "").trim() || null;
 
+    if (!preferredAccountId) {
+      if (tempAudioPath) await rm(tempAudioPath);
+      throw new ApiError(
+        ApiCodes.validation,
+        "a google account must be selected (preferredAccountId)",
+        400,
+      );
+    }
     // Reject an unknown account ID up front (clearer than a runner failure
     // later); the runner re-checks eligibility + a live verified session.
-    if (preferredAccountId && !ctx.accounts.get(preferredAccountId)) {
+    if (!ctx.accounts.get(preferredAccountId)) {
       if (tempAudioPath) await rm(tempAudioPath);
       throw new ApiError(ApiCodes.notFound, "preferred account not found", 404);
     }
@@ -331,16 +341,36 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     throw new ApiError(ApiCodes.invalidState, "job cannot be cancelled in this state", 409);
   });
 
-  // Re-queue a NEEDS_ATTENTION job (human reconciliation).
+  // Re-queue a job (operator action):
+  //  - NEEDS_ATTENTION: human reconciliation (attempt budget preserved);
+  //  - FAILED: explicit retry with the SAME account + inputs; the attempt
+  //    budget is reset, the stale error and last node selection are cleared,
+  //    and the runner re-validates the session and picks a FRESH proxy.
   app.post<{ Params: { id: string } }>("/api/jobs/:id/requeue", async (req) => {
     const job = ctx.jobs.get(req.params.id);
     if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    if (job.status !== "NEEDS_ATTENTION") {
-      throw new ApiError(ApiCodes.invalidState, "only NEEDS_ATTENTION jobs can be requeued", 409);
+    if (job.status === "NEEDS_ATTENTION") {
+      ctx.jobs.setStatus(job.id, "QUEUED");
+      ctx.jobs.appendEvent(job.id, "requeued", "job requeued by operator");
+      return { ok: true, status: "QUEUED" };
     }
-    ctx.jobs.setStatus(job.id, "QUEUED");
-    ctx.jobs.appendEvent(job.id, "requeued", "job requeued by operator");
-    return { ok: true, status: "QUEUED" };
+    if (job.status === "FAILED") {
+      ctx.jobs.setStatus(job.id, "QUEUED", {
+        attempt: 0,
+        progress: 0,
+        progressNote: null,
+        errorClass: null,
+        errorMessage: null,
+        nodeId: null, // force a fresh proxy selection
+      });
+      ctx.jobs.appendEvent(job.id, "retried", "job retried by operator (same account)");
+      return { ok: true, status: "QUEUED" };
+    }
+    throw new ApiError(
+      ApiCodes.invalidState,
+      "only FAILED or NEEDS_ATTENTION jobs can be requeued",
+      409,
+    );
   });
 }
 

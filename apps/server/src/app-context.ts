@@ -98,15 +98,14 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
 
   // Provider selection is EXPLICIT and observable: config.provider decides.
   // There is no silent fallback: "python-worker" must actually start.
-  // The worker gets the proxy manager so auth ops (login/verify) route
-  // through the same verified tunnels as jobs (fail-closed).
+  // The worker gets the proxy manager so auth ops (cookie-import verify)
+  // route through the same verified tunnels as jobs (fail-closed).
   const provider: NotebookLMProvider =
     config.provider === "python-worker"
       ? new PythonWorkerProvider({
           sessionDir: paths.sessionsDir,
           dataDir: config.dataDir,
           pythonBin: config.pythonBin,
-          loginBrowser: config.loginBrowser,
           jobTimeoutMs: config.jobTimeoutMs,
           allowDirect: config.allowDirectEgress,
           proxyManager,

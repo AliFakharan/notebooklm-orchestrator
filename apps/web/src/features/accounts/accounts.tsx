@@ -1,30 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  Boxes,
-  Download,
-  KeyRound,
-  LogOut,
-  Pencil,
-  Plus,
-  RefreshCw,
-  Star,
-  Trash2,
-  Upload,
-} from "lucide-react";
+import { Boxes, KeyRound, LogOut, Pencil, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
 import {
   accountCreate,
   accountDelete,
-  accountHealthCheck,
-  accountSetDefault,
   accountUpdate,
   accountsList,
   providerInfo,
-  sessionBrowserImport,
   sessionImport,
   sessionLogout,
   sessionRefresh,
   sessionsList,
-  BROWSER_COOKIE_OPTIONS,
   SESSION_STATE_LABELS,
   type Account,
   type ProviderInfo,
@@ -35,10 +20,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Select } from "@/components/ui/select";
 import { Dialog } from "@/components/ui/dialog";
 import { AlertDialog } from "@/components/ui/alert-dialog";
-import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -56,10 +39,10 @@ import { useToast } from "@/components/ui/toast";
 
 /**
  * حساب‌ها — the single place to manage all Google accounts:
- * add / list / select / sign in / import an existing browser session /
- * verify / re-authenticate / set default / remove. All authentication is
- * UI-driven; the only unavoidable manual step is the interactive Google
- * sign-in in the user's own browser.
+ * add / list / select / sign in (cookie paste) / verify / re-authenticate /
+ * set default / remove. All authentication is UI-driven: the user signs in
+ * to NotebookLM in their own browser, copies the session cookies, and pastes
+ * them here. This app never launches a browser.
  */
 export function AccountsPage() {
   const { toast } = useToast();
@@ -70,7 +53,6 @@ export function AccountsPage() {
   const [deleting, setDeleting] = useState<Account | null>(null);
   const [editing, setEditing] = useState<Account | null>(null);
   const [importing, setImporting] = useState<Account | null>(null);
-  const [pasteImporting, setPasteImporting] = useState<Account | null>(null);
   const [provider, setProvider] = useState<ProviderInfo | null>(null);
   const [sessions, setSessions] = useState<Record<string, SessionAccountView>>({});
 
@@ -100,35 +82,6 @@ export function AccountsPage() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const patch = async (id: string, changes: Parameters<typeof accountUpdate>[1]) => {
-    setBusyId(id);
-    try {
-      const updated = await accountUpdate(id, changes);
-      setItems((l) => l?.map((a) => (a.id === id ? updated : a)) ?? null);
-    } catch (err) {
-      toast({ title: "به‌روزرسانی ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const probe = async (a: Account) => {
-    setBusyId(a.id);
-    try {
-      const res = await accountHealthCheck(a.id);
-      setItems((l) => l?.map((x) => (x.id === a.id ? res.account : x)) ?? null);
-      toast({
-        title: res.ok ? "حساب سالم است" : "مشکل در حساب",
-        description: res.detail,
-        variant: res.ok ? "success" : "error",
-      });
-    } catch (err) {
-      toast({ title: "بررسی وضعیت ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const doVerify = async (a: Account) => {
     setBusyId(a.id);
@@ -166,31 +119,6 @@ export function AccountsPage() {
     } finally {
       setBusyId(null);
       void load();
-    }
-  };
-
-  const doSetDefault = async (a: Account) => {
-    setBusyId(a.id);
-    try {
-      await accountSetDefault(a.id, !a.isDefault);
-      setItems(
-        (l) => l?.map((x) => ({ ...x, isDefault: x.id === a.id ? !a.isDefault : false })) ?? null,
-      );
-      toast({
-        title: a.isDefault ? "حساب پیش‌فرض حذف شد" : "حساب پیش‌فرض شد",
-        description: a.isDefault
-          ? undefined
-          : "درخواست‌های جدید بدون انتخاب صریح، این حساب را به کار می‌برند.",
-        variant: "success",
-      });
-    } catch (err) {
-      toast({
-        title: "تغییر حساب پیش‌فرض ناموفق بود",
-        description: errMessage(err),
-        variant: "error",
-      });
-    } finally {
-      setBusyId(null);
     }
   };
 
@@ -254,10 +182,6 @@ export function AccountsPage() {
                 <TableHead>حساب</TableHead>
                 <TableHead>وضعیت</TableHead>
                 {provider && !provider.isMock && <TableHead>جلسه (ورود واقعی)</TableHead>}
-                <TableHead>پیش‌فرض</TableHead>
-                <TableHead>فعال</TableHead>
-                <TableHead>آخرین موفقیت</TableHead>
-                <TableHead>توضیح سقف</TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
@@ -265,12 +189,7 @@ export function AccountsPage() {
               {items.map((a) => (
                 <TableRow key={a.id}>
                   <TableCell>
-                    <p className="text-sm font-medium">{a.label}</p>
-                    {a.displayEmail && (
-                      <p className="text-xs text-muted-foreground" dir="ltr">
-                        {a.displayEmail}
-                      </p>
-                    )}
+                    <p className="text-sm font-medium">{a.displayEmail || a.label}</p>
                     {a.lastError && (
                       <p
                         className="mt-1 max-w-56 truncate text-xs text-destructive"
@@ -290,48 +209,12 @@ export function AccountsPage() {
                         busy={busyId === a.id}
                         onVerify={() => void doVerify(a)}
                         onLogout={() => void doLogout(a)}
-                        onImportFromBrowser={() => setImporting(a)}
-                        onPasteImport={() => setPasteImporting(a)}
+                        onImport={() => setImporting(a)}
                       />
                     </TableCell>
                   )}
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={a.isDefault ? "حذف حالت پیش‌فرض" : "تنظیم به‌عنوان پیش‌فرض"}
-                      title={a.isDefault ? "حساب پیش‌فرض فعلی" : "تنظیم به‌عنوان حساب پیش‌فرض"}
-                      disabled={busyId === a.id}
-                      onClick={() => void doSetDefault(a)}
-                    >
-                      <Star className={a.isDefault ? "fill-amber-400 text-amber-500" : undefined} />
-                    </Button>
-                  </TableCell>
-                  <TableCell>
-                    <Switch
-                      checked={a.enabled}
-                      disabled={busyId === a.id}
-                      aria-label={`فعال/غیرفعال ${a.label}`}
-                      onCheckedChange={(on) => void patch(a.id, { enabled: on })}
-                    />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    <RelativeTime iso={a.lastSuccessAt} />
-                  </TableCell>
-                  <TableCell className="max-w-40 truncate text-xs text-muted-foreground">
-                    {a.quotaNote ?? "—"}
-                  </TableCell>
-                  <TableCell>
                     <div className="flex items-center justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label="بررسی وضعیت"
-                        disabled={busyId === a.id}
-                        onClick={() => void probe(a)}
-                      >
-                        <RefreshCw className={busyId === a.id ? "animate-spin" : undefined} />
-                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -367,14 +250,9 @@ export function AccountsPage() {
         onClose={() => setEditing(null)}
         onSaved={() => void load()}
       />
-      <BrowserImportDialog
+      <CookieImportDialog
         account={importing}
         onClose={() => setImporting(null)}
-        onDone={() => void load()}
-      />
-      <PasteImportDialog
-        account={pasteImporting}
-        onClose={() => setPasteImporting(null)}
         onDone={() => void load()}
       />
 
@@ -407,27 +285,25 @@ function CreateAccountDialog({
   onCreated: () => void;
 }) {
   const { toast } = useToast();
-  const [label, setLabel] = useState("");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const submit = async () => {
-    if (!label.trim()) {
-      setErr("برچسب حساب الزامی است.");
+    if (!email.trim()) {
+      setErr("ایمیل حساب گوگل الزامی است.");
       return;
     }
     setBusy(true);
     setErr(null);
     try {
-      await accountCreate({ label: label.trim(), displayEmail: email.trim() || undefined });
+      await accountCreate({ email: email.trim() });
       toast({
         title: "حساب ثبت شد",
         description:
-          "حالا با «دریافت از مرورگر واقعی» یا «ورود با مرورگر» وارد گوگل شوید و سپس تأیید کنید.",
+          "حالا کوکی‌های نشستِ گوگل را از مرورگر خود کپی و در «ورود با کوکی‌های مرورگر» بچسبانید.",
         variant: "success",
       });
-      setLabel("");
       setEmail("");
       onOpenChange(false);
       onCreated();
@@ -443,7 +319,7 @@ function CreateAccountDialog({
       open={open}
       onOpenChange={onOpenChange}
       title="حساب گوگل جدید"
-      description="شناسه‌ی داخلی به‌طور خودکار ساخته می‌شود. ایمیل نمایشی (در صورت درج) باعث می‌شود پس از ورود، هویت واقعیِ تأییدشده با آن مقایسه و ناسازگاری تشخیص داده شود."
+      description="ایمیل، هویت حساب است (برچسب همان ایمیل می‌شود) و نمی‌تواند تکراری باشد. پس از ورود، هویت واقعیِ تأییدشده با آن مقایسه می‌شود."
       footer={
         <>
           <Button disabled={busy} onClick={() => void submit()}>
@@ -456,16 +332,7 @@ function CreateAccountDialog({
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label="برچسب" htmlFor="acc-label">
-          <Input
-            id="acc-label"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="مثلاً: حساب اصلی"
-            error={err ?? undefined}
-          />
-        </Field>
-        <Field label="ایمیل حساب گوگل (اختیاری، برای تشخیص ناسازگاری هویت)" htmlFor="acc-email">
+        <Field label="ایمیل حساب گوگل" htmlFor="acc-email">
           <Input
             id="acc-email"
             type="email"
@@ -473,6 +340,7 @@ function CreateAccountDialog({
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="user@gmail.com"
+            error={err ?? undefined}
           />
         </Field>
       </div>
@@ -490,17 +358,13 @@ function EditAccountDialog({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const [label, setLabel] = useState("");
   const [email, setEmail] = useState("");
-  const [quotaNote, setQuotaNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (account) {
-      setLabel(account.label);
       setEmail(account.displayEmail);
-      setQuotaNote(account.quotaNote ?? "");
       setErr(null);
     }
   }, [account]);
@@ -512,9 +376,7 @@ function EditAccountDialog({
     setErr(null);
     try {
       await accountUpdate(account.id, {
-        label: label.trim() || account.label,
         displayEmail: email.trim(),
-        quotaNote: quotaNote.trim() || null,
       });
       toast({ title: "حساب به‌روزرسانی شد", variant: "success" });
       onClose();
@@ -544,54 +406,32 @@ function EditAccountDialog({
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label="برچسب" htmlFor="edit-label">
-          <Input
-            id="edit-label"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            error={err ?? undefined}
-          />
-        </Field>
-        <Field label="ایمیل نمایشی" htmlFor="edit-email">
+        <Field label="ایمیل حساب" htmlFor="edit-email">
           <Input
             id="edit-email"
             type="email"
             dir="ltr"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            error={err ?? undefined}
           />
-        </Field>
-        <Field label="توضیح سقف/کوتا (اختیاری)" htmlFor="edit-quota">
-          <Input id="edit-quota" value={quotaNote} onChange={(e) => setQuotaNote(e.target.value)} />
         </Field>
       </div>
     </Dialog>
   );
 }
 
-/* ------------------------- browser cookie import -------------------------- */
-
-const BROWSER_LABELS: Record<string, string> = {
-  auto: "خودکار (هر مرورگر موجود)",
-  chrome: "Google Chrome",
-  firefox: "Firefox",
-  chromium: "Chromium",
-  brave: "Brave",
-  edge: "Microsoft Edge",
-  opera: "Opera",
-  vivaldi: "Vivaldi",
-  librewolf: "LibreWolf",
-  zen: "Zen Browser",
-  cachy: "Cachy Browser",
-};
+/* ----------------- cookie paste import (the only auth path) ----------------- */
 
 /**
- * دریافت از مرورگر واقعی — the primary sign-in path for environments where
- * Google rejects the app's automated Playwright browser. The user signs in
- * once with their normal browser; the app copies the session locally and
- * verifies it against the real service. Nothing is pasted or moved by hand.
+ * ورود با کوکی‌های مرورگر — the ONLY way to sign an account in. The user
+ * signs into notebooklm.google.com in their own (non-automated) browser,
+ * copies the session cookies with any "copy cookies" extension, and pastes
+ * them here. The server parses the paste (storage-state JSON / JSON cookie
+ * array / Netscape cookies.txt), filters to google.com cookies, stores the
+ * session 0600, and verifies it against the REAL service before it is green.
  */
-function BrowserImportDialog({
+function CookieImportDialog({
   account,
   onClose,
   onDone,
@@ -601,183 +441,35 @@ function BrowserImportDialog({
   onDone: () => void;
 }) {
   const { toast } = useToast();
-  const [browser, setBrowser] = useState<string>("chrome");
-  const [accountEmail, setAccountEmail] = useState("");
+  const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [routingNote, setRoutingNote] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
     if (account) {
-      setBrowser("chrome");
-      setAccountEmail(account.displayEmail || "");
+      setText("");
       setErr(null);
-      setRoutingNote(null);
+      setShowGuide(false);
     }
   }, [account]);
 
   if (!account) return null;
 
   const run = async () => {
-    setBusy(true);
-    setErr(null);
-    setRoutingNote(null);
-    try {
-      const res = await sessionBrowserImport(account.id, {
-        browser,
-        account: accountEmail.trim() || undefined,
-        timeoutSec: 180,
-      });
-      toast({
-        title: "جلسه از مرورگر واقعی دریافت و تأیید شد",
-        description: res.email ? `هویت تأییدشده: ${res.email}` : undefined,
-        variant: "success",
-      });
-      setRoutingNote(res.routingNote ?? null);
-      onDone();
-    } catch (e) {
-      const msg = errMessage(e);
-      setErr(actionableImportError(msg));
-      toast({ title: "دریافت جلسه ناموفق بود", description: msg, variant: "error" });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog
-      open
-      onOpenChange={(o) => !o && !busy && onClose()}
-      title="دریافت جلسه از مرورگر واقعی"
-      description="ابتدا در مرورگر عادیِ خود (همان‌جا که معمولاً کار می‌کنید) وارد notebooklm.google.com شوید؛ سپس اینجا مرورگر را انتخاب کنید تا برنامه‌ی این نشست را به‌صورت محلی و امن کپی کند. محتواً هیچ کوکی یا توکنی در این صفحه نمایش داده نمی‌شود."
-      footer={
-        <>
-          <Button disabled={busy} onClick={() => void run()}>
-            <Download />
-            {busy ? "در حال دریافت و تأیید…" : "دریافت و تأیید"}
-          </Button>
-          <Button variant="outline" data-autofocus disabled={busy} onClick={onClose}>
-            انصراف
-          </Button>
-        </>
-      }
-    >
-      <div className="flex flex-col gap-4">
-        <Field
-          label="مرورگر"
-          htmlFor="bi-browser"
-          hint="فهرست مجاز برنامه‌است؛ مسیر یا اجرایی دلخواً نمی‌پذیرد."
-        >
-          <Select
-            id="bi-browser"
-            value={browser}
-            disabled={busy}
-            onChange={(e) => setBrowser(e.target.value)}
-            options={BROWSER_COOKIE_OPTIONS.map((b) => ({
-              value: b,
-              label: BROWSER_LABELS[b] ?? b,
-            }))}
-          />
-        </Field>
-        <Field
-          label="حساب گوگل مقصود (ایمیل)"
-          htmlFor="bi-account"
-          hint="اگر چند حساب گوگل در مرورگر واردشده است، با این ایمیل حساب درست انتخاب می‌شود. خالی بگذارید تا حساب پیش‌فرضِ مرورگر استفاده شود."
-        >
-          <Input
-            id="bi-account"
-            type="email"
-            dir="ltr"
-            value={accountEmail}
-            disabled={busy}
-            onChange={(e) => setAccountEmail(e.target.value)}
-            placeholder="you@gmail.com"
-          />
-        </Field>
-        {err && (
-          <div className="rounded-field border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            {err}
-          </div>
-        )}
-        {routingNote && (
-          <div className="rounded-field border border-line bg-field p-3 text-xs text-muted-foreground">
-            {routingNote}
-          </div>
-        )}
-        <p className="text-xs text-muted-foreground">
-          نکته: خودِ مرورگر در این مرحله از تونل VLESS استفاده نمی‌کند (خواندن کوکی از دیسک محلی
-          است)؛ اما تأیید جلسه و تمام درخواست‌های بعدی به NotebookLM از تونل پیکربندی‌شده عبور
-          می‌کنند.
-        </p>
-      </div>
-    </Dialog>
-  );
-}
-
-/** Turn raw import errors into clear, actionable guidance (Persian). */
-function actionableImportError(msg: string): string {
-  const m = msg.toLowerCase();
-  if (m.includes("locked") || m.includes("busy")) {
-    return "پایگاه کوکی مرورگر قفل است؛ مرورگر (یا تمام پنجره‌های آن) را ببندید و دوباره امتحان کنید.";
-  }
-  if (m.includes("decrypt") || m.includes("password") || m.includes("keyring")) {
-    return "گشایش کوکی‌ها ممکن نبود (کلید رمزگشایی در دسترس نیست). مرورگر را یک‌بار دستی با گذرواژه‌ی سیستم باز و کوکی‌ها را نگه دارید، سپس دوباره امتحان کنید.";
-  }
-  if (m.includes("no cookies") || m.includes("not found") || m.includes("no valid google")) {
-    return "کوکی معتبرِ گوگل در این مرورگر یافت نشد؛ مطمئن شوید در همین مرورگر (و همین نمایه) به حساب گوگل مقصود واردشده‌اید.";
-  }
-  if (m.includes("stale")) {
-    return "کوکی‌های گوگل قدیمی/نامعتبر بودند؛ در مرورگر خود یک‌بار تازه وارد شوید و دوباره امتحان کنید.";
-  }
-  if (m.includes("mismatch")) {
-    return "هویت حساب دریافتی با ایمیل این حساب مطابقت ندارد. ایمیل صحیح را در کادر بالا بگذارید و دوباره امتحان کنید.";
-  }
-  if (m.includes("proxy") || m.includes("tunnel") || m.includes("health")) {
-    return "مسیر تونل برای تأیید در دسترس نبود. ابتدا در صفحه‌ی «پراکسی‌ها» یک گره سالم تأییدشده داشته باشید.";
-  }
-  return msg;
-}
-
-/* ----------------------- advanced storage-state paste --------------------- */
-
-function PasteImportDialog({
-  account,
-  onClose,
-  onDone,
-}: {
-  account: Account | null;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const { toast } = useToast();
-  const [jsonText, setJsonText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (account) {
-      setJsonText("");
-      setErr(null);
-    }
-  }, [account]);
-
-  if (!account) return null;
-
-  const run = async () => {
-    if (!jsonText.trim()) {
-      setErr("JSON را چسبانده‌اید؟");
+    if (!text.trim()) {
+      setErr("متن کوکی‌ها را وارد کرده‌اید؟");
       return;
     }
     setBusy(true);
     setErr(null);
     try {
-      const res = await sessionImport(account.id, {
-        base64: btoa(unescape(encodeURIComponent(jsonText))),
-      });
+      const res = await sessionImport(account.id, { cookies: text });
       if (res.mismatch) {
         toast({
           title: "ناسازگاری هویت",
-          description: "هویت جلسه با این حساب مطابقت ندارد و به حالت نامعتبر درآمده است.",
+          description:
+            "هویت کوکی‌ها با ایمیل این حساب مطابقت ندارد و جلسه به حالت نامعتبر درآمده است. کوکی‌های همان حسابی که ایمیلش را در «ایمیل حساب» ثبت کرده‌اید بچسبانید.",
           variant: "error",
         });
       } else {
@@ -787,9 +479,10 @@ function PasteImportDialog({
           variant: res.ok ? "success" : "error",
         });
       }
+      if (res.ok) setText("");
       onDone();
     } catch (e) {
-      setErr(errMessage(e));
+      setErr(actionableImportError(errMessage(e)));
     } finally {
       setBusy(false);
     }
@@ -799,11 +492,11 @@ function PasteImportDialog({
     <Dialog
       open
       onOpenChange={(o) => !o && !busy && onClose()}
-      title="ورود پیشرفته: چسباندن storage-state"
-      description="مسیر اختیاری برای کاربرانی که فایل storage_state.json با ساختار Playwright را دارند. محتوای چسبانده‌شده بررسی شده، به‌صورت ۰۶۰۰ ذخیره و در برابر سرویس واقعی تأیید می‌شود."
+      title="ورود با کوکی‌های مرورگر"
+      description="در مرورگر عادی خود (همان‌جا که معمولاً کار می‌کنید) وارد notebooklm.google.com شوید، کوکی‌های نشستِ گوگل را با افزونه‌ی «کپی کوکی‌ها» کپی کنید و اینجا بچسبانید. برنامه مرورگری باز نمی‌کند و به کوکی‌های مرورگر شما دسترسی مستقیم ندارد."
       footer={
         <>
-          <Button disabled={busy || !jsonText.trim()} onClick={() => void run()}>
+          <Button disabled={busy || !text.trim()} onClick={() => void run()}>
             <Upload />
             {busy ? "در حال ذخیره و تأیید…" : "ذخیره و تأیید"}
           </Button>
@@ -814,44 +507,119 @@ function PasteImportDialog({
       }
     >
       <div className="flex flex-col gap-3">
-        <Field label="JSON storage-state" htmlFor="pi-json">
+        <Field label="کوکی‌های کپی‌شده (JSON یا cookies.txt)" htmlFor="ci-cookies">
           <Textarea
-            id="pi-json"
+            id="ci-cookies"
             dir="ltr"
             rows={8}
-            value={jsonText}
-            onChange={(e) => setJsonText(e.target.value)}
-            placeholder='{"cookies":[ ... ],"origins":[ ... ]}'
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={
+              '{"cookies":[ ... ]}  یا  [{"domain":".google.com","name":"SID",...}]  یا  cookies.txt'
+            }
           />
         </Field>
         {err && <p className="text-xs font-medium text-destructive">{err}</p>}
+        <button
+          type="button"
+          className="self-start text-xs text-primary underline underline-offset-2"
+          onClick={() => setShowGuide((v) => !v)}
+        >
+          {showGuide ? "بستن راهنمای کپی کوکی" : "راهنمای کپی کوکی از مرورگر"}
+        </button>
+        {showGuide && (
+          <div
+            dir="ltr"
+            className="max-h-64 overflow-auto whitespace-pre-wrap rounded-field border border-line bg-field p-3 text-left text-xs leading-6 text-muted-foreground"
+          >
+            {COOKIE_COPY_GUIDE}
+          </div>
+        )}
       </div>
     </Dialog>
   );
+}
+
+/** Per-browser how-to for copying the signed-in Google session cookies. */
+const COOKIE_COPY_GUIDE = `Chrome / Chromium / Brave / Edge (Windows & Linux):
+1. Install the "Cookie-Editor" (or "Get cookies.txt LOCALLY") extension.
+2. Open https://notebooklm.google.com in the profile you are signed into
+   (it must show your notebooks — if it redirects to sign-in, sign in first).
+3. Click the extension icon; choose "Copy as JSON" (Cookie-Editor) or
+   "Copy as cookies.txt"; paste it here.
+   Tip: filter by domain "google.com" before copying — only google.com
+   cookies are needed.
+
+Firefox:
+1. Install the "Cookie Quick Manager" (or "cookies.txt") extension.
+2. Open https://notebooklm.google.com signed in.
+3. Site data > select the google.com cookies > "Export to cookies.txt" (or
+   copy as JSON); paste it here.
+
+Safari (macOS/iOS): no extension store — use the Console:
+   (window.localStorage + cookie access is restricted; the supported route
+   on macOS is "Develop > Show JavaScript Console" and copying the
+   Document.cookie of the notebooklm.google.com tab — this covers the
+   non-HttpOnly session cookies; for full fidelity use Chrome/Firefox.)
+
+All formats are auto-detected:
+  * Playwright storage state  {"cookies":[...],"origins":[...]}
+  * JSON cookie array         [{"domain":".google.com","name":...}, ...]
+  * Netscape cookies.txt      #HttpOnly_.google.com <TAB> TRUE <TAB> / ...
+
+Only google.com cookies are kept; a paste without them is rejected.`;
+
+/** Turn raw import errors into clear, actionable guidance (Persian). */
+function actionableImportError(msg: string): string {
+  const m = msg.toLowerCase();
+  if (m.includes("no google.com cookies")) {
+    return "کوکی‌های google.com در متن یافت نشد؛ کوکی‌های همان نمایه‌ای را که با آن به NotebookLM واردشده‌اید کپی کنید (ترجیحاً با فیلتر روی دامنه‌ی google.com).";
+  }
+  if (m.includes("not valid") || m.includes("unrecognized") || m.includes("json")) {
+    return "متن واردشده خوانده نشد؛ خروجی افزونه را کامل کپی کنید (JSON کامل یا کل فایل cookies.txt) — نه بخشی از آن.";
+  }
+  if (m.includes("missing") || m.includes("cookie")) {
+    return "ساختار کوکی‌ها ناقص به نظر می‌رسد؛ از خروجی مستقیم افزونه (Copy as JSON / cookies.txt) استفاده کنید.";
+  }
+  if (
+    m.includes("stale") ||
+    m.includes("expired") ||
+    m.includes("re-auth") ||
+    m.includes("rejected")
+  ) {
+    return "کوکی‌های گوگل قدیمی/نامعتبر بودند؛ در مرورگر خود یک‌بار تازه وارد NotebookLM شوید، دوباره کپی و بچسبانید.";
+  }
+  if (m.includes("mismatch")) {
+    return "هویت حساب دریافتی با ایمیل این حساب مطابقت ندارد. کوکی‌های همان حسابی را که ایمیلش در حساب ثبت شده بچسبانید.";
+  }
+  if (m.includes("proxy") || m.includes("tunnel") || m.includes("health")) {
+    return "مسیر تونل برای تأیید در دسترس نبود. ابتدا در صفحه‌ی «پراکسی‌ها» یک گره سالم تأییدشده داشته باشید.";
+  }
+  if (m.includes("too large")) {
+    return "ورودی خیلی بزرگ است؛ فقط کوکی‌های google.com را کپی کنید.";
+  }
+  return msg;
 }
 
 /* ------------------------------ session cell ------------------------------ */
 
 /**
  * SessionCell: the real auth-session state machine for one account and the
- * full action set (import from real browser / advanced paste / verify /
- * logout). States shown: not configured, ready, verified, expired, invalid,
- * wrong account, re-auth needed.
+ * full action set (cookie-paste import / verify / logout). States shown: not
+ * configured, ready, verified, expired, invalid, wrong account, re-auth needed.
  */
 function SessionCell({
   view,
   busy,
   onVerify,
   onLogout,
-  onImportFromBrowser,
-  onPasteImport,
+  onImport,
 }: {
   view: SessionAccountView | null;
   busy: boolean;
   onVerify: () => void;
   onLogout: () => void;
-  onImportFromBrowser: () => void;
-  onPasteImport: () => void;
+  onImport: () => void;
 }) {
   const state = view?.session?.state ?? "UNKNOWN";
   const email = view?.session?.email ?? null;
@@ -897,37 +665,27 @@ function SessionCell({
       )}
       {!view?.session && (
         <p className="max-w-52 text-xs text-muted-foreground">
-          هنوز جلسایی وجود ندارد؛ با «دریافت از مرورگر واقعی» شروع کنید.
+          هنوز جلسه‌ای وجود ندارد؛ با «ورود با کوکی‌های مرورگر» شروع کنید.
         </p>
       )}
       {(state === "SESSION_EXPIRED" ||
         state === "SESSION_INVALID" ||
         state === "AUTH_REQUIRED") && (
         <p className="max-w-52 text-xs text-muted-foreground">
-          برای ادامه، دوباره وارد شوید یا جلسه را از مرورگر واقعی به‌روزرسانی کنید.
+          برای ادامه، کوکی‌های تازه‌ی مرورگر خود را دوباره کپی و وارد کنید.
         </p>
       )}
       <div className="flex flex-wrap items-center gap-1">
         <Button
           variant="outline"
           size="sm"
-          aria-label="دریافت از مرورگر واقعی"
-          title="دریافت جلسه از مرورگر واقعی (توصیه‌شده وقتی گوگل مرورگر خودکار را رد کند)"
+          aria-label="ورود با کوکی‌های مرورگر"
+          title="کپی‌شده‌ی کوکی‌های نشستِ گوگل را از مرورگر خود بچسبانید (تغییر/به‌روزرسانی جلسه هم از همین‌جا)"
           disabled={busy || inProgress}
-          onClick={onImportFromBrowser}
-        >
-          <Download />
-          مرورگر واقعی
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="ورود پیشرفته (storage-state)"
-          title="چسباندن storage-state (پیشرفته)"
-          disabled={busy || inProgress}
-          onClick={onPasteImport}
+          onClick={onImport}
         >
           <Upload />
+          کوکی‌های مرورگر
         </Button>
         <Button
           variant="ghost"

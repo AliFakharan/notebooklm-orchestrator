@@ -45,8 +45,9 @@ npm run start --workspace @nlo/server
 npm run worker:setup --workspace @nlo/server
 ```
 
-این دستور `data/venv` می‌سازد و داخلش `notebooklm-py` + chromium بازیابی‌شده‌ی
-playwright را نصب می‌کند (تنها دسترسی شبکه‌ی این مرحله، PyPI است).
+این دستور `data/venv` می‌سازد و داخلش `notebooklm-py` را نصب می‌کند
+(تنها دسترسی شبکه‌ی این مرحله، PyPI است). مرورگر موردنیاز نیست: ورود حساب‌ها
+با چسباندن کوکی‌های نشستِ گوگل از مرورگر عادی شما انجام می‌شود.
 
 ### مرحله‌ی ۲ — باینری Xray
 

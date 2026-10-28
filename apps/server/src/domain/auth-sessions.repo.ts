@@ -42,6 +42,10 @@ const TRANSITIONS: Record<AuthSessionState, AuthSessionState[]> = {
     "ACCESS_UNAVAILABLE",
     "DISABLED",
     "AUTH_REQUIRED",
+    // Re-import (pasting renewed cookies) is the supported renewal path —
+    // it replaces the stored session file while keeping the state machine
+    // honest (AUTH_IN_PROGRESS -> AUTHENTICATED/AUTH_REQUIRED).
+    "AUTH_IN_PROGRESS",
   ],
   SESSION_EXPIRED: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],
   SESSION_INVALID: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],

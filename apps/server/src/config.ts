@@ -21,7 +21,6 @@ export interface AppConfig {
    * build) or "chrome"/"msedge" (system-installed browser, used when the
    * bundled download is unavailable). Default "chromium".
    */
-  loginBrowser: string;
   /** Hard timeout for a live job (ms). */
   jobTimeoutMs: number;
   /** Development only: allow live jobs without a proxy tunnel. */
@@ -134,7 +133,6 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     liveTestsEnabled: boolEnv("NLO_LIVE_TESTS", false),
     healthAllowlist,
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
-    loginBrowser: env("NLO_LOGIN_BROWSER") ?? "chromium",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),
   };

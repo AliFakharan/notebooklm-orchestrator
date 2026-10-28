@@ -4,8 +4,8 @@
  * Run:  npm run verify:live --workspace @nlo/server
  *
  * Proves, with printed evidence, that the REAL path works end to end:
- *   STEP 1  login     — real Google sign-in via Playwright (worker); the
- *                        storage-state is stored 0600 and verified live.
+ *   STEP 1  session   — the pasted-cookie storage-state (stored 0600)
+ *                        verifies live against the REAL service.
  *   STEP 2  proxy     — real Xray tunnel for a configured node; a REAL
  *                        HTTPS request through it (CONNECT + TLS) proves the
  *                        route; observed public egress IP is printed.
@@ -80,20 +80,17 @@ async function main() {
     const info0 = await w.start();
     if (info0.version) ok(`notebooklm-py v${info0.version} imports cleanly`);
     else fail("notebooklm-py NOT importable in worker python");
-    if (info0.playwright) ok("playwright importable");
-    else {
-      info(
-        "playwright NOT installed — STEP 1 (login) will need: pip install playwright && playwright install chromium",
-      );
-    }
+    info(
+      `worker reports playwright=${String(info0.playwright)} (informational only — cookie paste-import does not require it)`,
+    );
   } catch (e) {
     fail(`worker start failed: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     await w.close().catch(() => {});
   }
 
-  // --- STEP 1: login (real Google sign-in) ------------------------------------
-  step("1: account session (login / verify)");
+  // --- STEP 1: account session (cookie import / verify) ----------------------
+  step("1: account session (cookie import / verify)");
   const accts = accounts.list().filter((a) => a.enabled);
   if (accts.length === 0) {
     fail("no enabled account configured — add one via the UI/API first");
@@ -107,7 +104,7 @@ async function main() {
     const file = provider.sessionPathFor(acct.id);
     if (!existsSync(file)) {
       info(
-        `account ${acct.label}: no stored session. A human must complete login: POST /api/sessions/${acct.id}/login (interactive browser).`,
+        `account ${acct.label}: no stored session. Paste the session cookies from your own browser: POST /api/sessions/${acct.id}/import (or the UI "cookie import").`,
       );
       fail(`account ${acct.label}: no stored session file (${file})`);
       continue;
@@ -126,7 +123,7 @@ async function main() {
           lastError: status.detail ?? "rejected",
         });
         fail(
-          `account ${acct.label}: service REJECTED the stored session — re-login required. ${status.detail}`,
+          `account ${acct.label}: service REJECTED the stored session — paste fresh cookies. ${status.detail}`,
         );
       }
     } catch (e) {

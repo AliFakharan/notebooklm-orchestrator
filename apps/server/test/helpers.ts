@@ -100,8 +100,8 @@ export function makeParts(): TestParts {
   };
 }
 
-export function addAccount(accounts: AccountsRepo, label: string): { id: string } {
-  const a = accounts.create({ label, displayEmail: `${label}@example.com` });
+export function addAccount(accounts: AccountsRepo, name: string): { id: string } {
+  const a = accounts.create({ email: `${name}@example.com` });
   accounts.update(a.id, { status: "ACTIVE" });
   return { id: a.id };
 }

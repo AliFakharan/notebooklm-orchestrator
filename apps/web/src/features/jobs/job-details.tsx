@@ -148,8 +148,8 @@ export function JobDetailsPage() {
                   پایان: <RelativeTime iso={job.finishedAt} />
                 </span>
               )}
-              <span>
-                تلاش: {fa(job.attempt)} از {fa(job.maxAttempts)}
+              <span title="تلاش‌های خودکار رانر (بدون دخالت شما)؛ با «بازتلاش» این شمارش از نو شروع می‌شود">
+                تلاش خودکار: {fa(job.attempt)} از {fa(job.maxAttempts)}
               </span>
               {job.nodeId && <span dir="ltr">node: {job.nodeId.slice(0, 8)}</span>}
             </div>
@@ -172,6 +172,16 @@ export function JobDetailsPage() {
               <Button size="sm" onClick={() => void doRequeue()}>
                 <RotateCcw />
                 در صف دوباره
+              </Button>
+            )}
+            {job.status === "FAILED" && (
+              <Button
+                size="sm"
+                onClick={() => void doRequeue()}
+                title="با همان حساب و اطلاعات دوباره وارد صف می‌شود؛ پراکسی تازه انتخاب خواهد شد"
+              >
+                <RotateCcw />
+                بازتلاش
               </Button>
             )}
           </div>

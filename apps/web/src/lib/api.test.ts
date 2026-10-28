@@ -114,14 +114,14 @@ describe("jobCreate multipart", () => {
     expect((body.get("audio") as File).name).toBe("a.wav");
   });
 
-  it("omits audio and empty preferences", async () => {
+  it("omits audio and node preference", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { id: "j2", status: "CREATED" }));
     vi.stubGlobal("fetch", fetchMock);
-    await jobCreate({ prompt: "q", audio: null });
+    await jobCreate({ prompt: "q", audio: null, preferredAccountId: "acc1" });
     const body = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
     expect(body.get("prompt")).toBe("q");
     expect(body.get("audio")).toBeNull();
-    expect(body.get("preferredAccountId")).toBeNull();
+    expect(body.get("preferredAccountId")).toBe("acc1");
     expect(body.get("preferredNodeId")).toBeNull();
   });
 });

@@ -13,7 +13,10 @@ const TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   RUNNING: ["RETRY_WAIT", "SUCCEEDED", "FAILED", "NEEDS_ATTENTION", "CANCEL_REQUESTED"],
   RETRY_WAIT: ["WAITING_FOR_ACCOUNT", "FAILED", "CANCELLED"],
   SUCCEEDED: [],
-  FAILED: [],
+  // FAILED -> QUEUED: explicit operator retry (POST /api/jobs/:id/retry)
+  // re-queues the job with the same account + inputs; the runner re-validates
+  // the session and picks a fresh proxy.
+  FAILED: ["QUEUED"],
   NEEDS_ATTENTION: ["QUEUED", "CANCELLED"],
   CANCEL_REQUESTED: ["CANCELLED"],
   CANCELLED: [],

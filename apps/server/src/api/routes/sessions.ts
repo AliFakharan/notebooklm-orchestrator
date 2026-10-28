@@ -6,16 +6,27 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ApiError, ApiCodes } from "@nlo/shared";
 import type { AppContext } from "../../app-context.js";
 import { PythonWorkerProvider } from "../../providers/python-worker/python-worker-provider.js";
+import {
+  CookieImportError,
+  parsePastedCookies,
+  toStorageState,
+} from "../../domain/cookie-import.js";
 
 /**
- * Auth session routes: REAL login/verify/import/logout for the python-worker
- * provider (Playwright interactive sign-in, storage-state import, verification
- * against the real service).
+ * Auth session routes: REAL cookie-paste import / verify / logout for the
+ * python-worker provider.
+ *
+ * The ONLY way to authenticate an account is to paste session cookies that
+ * the user copied from their own (non-automated) browser after signing into
+ * notebooklm.google.com there. This app never launches a browser and never
+ * reads a browser's cookie jar.
  *
  * Security notes:
  *  - storage-state files live under data/sessions/ with 0600 and are NEVER
  *    served over HTTP (no route returns the file body).
- *  - imports accept base64 or a server-side path and are JSON-validated.
+ *  - pasted cookie input is parsed (storage state / JSON array / Netscape
+ *    cookies.txt), filtered to google.com cookies, and re-serialized into a
+ *    strict Playwright storage state before it is written.
  *  - an import that the service rejects is recorded as SESSION_INVALID —
  *    the session is never "green" on faith in the file alone.
  */
@@ -139,7 +150,9 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     const accounts = ctx.accounts.list();
     return {
       provider: ctx.provider.name,
-      interactiveLogin: worker !== null,
+      // This app never launches a browser: accounts authenticate by pasting
+      // cookies copied from the user's own browser (see /import).
+      interactiveLogin: false,
       sessions: accounts.map((a) => sessionView(a.id)),
     };
   });
@@ -150,15 +163,11 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     return sessionView(acct.id);
   });
 
-  // --- interactive browser login -------------------------------------------
-  const loginBody = z.object({
-    timeoutSec: z.number().int().min(60).max(1800).optional(),
-    headless: z.boolean().optional(),
-    /** Browser channel override: "chromium" (bundled) or "chrome"/"msedge". */
-    browser: z.enum(["chromium", "chrome", "msedge"]).optional(),
-  });
-
-  // Shared entry check for both live auth paths (login / browser-import).
+  // --- paste-import (the only auth path) ------------------------------------
+  // Re-import must be possible from ANY state (including AUTHENTICATED): the
+  // user's browser session expires server-side and refreshing the pasted
+  // cookies is how they recover. Only a concurrent op (or a manually
+  // DISABLED session) blocks it.
   const canEnterAuth = (accountId: string): void => {
     ctx.sessions.ensure(
       accountId,
@@ -174,140 +183,26 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
           409,
         );
       }
-      // Stale AUTH_IN_PROGRESS (server restarted mid-login) — recoverable.
-    } else if (
-      ![
-        "AUTH_REQUIRED",
-        "CONFIGURED",
-        "UNKNOWN",
-        "SESSION_EXPIRED",
-        "SESSION_INVALID",
-        "ACCESS_UNAVAILABLE",
-      ].includes(cur.state)
-    ) {
+      // Stale AUTH_IN_PROGRESS (server restarted mid-op) — recoverable.
+    } else if (cur.state === "DISABLED") {
       throw new ApiError(ApiCodes.validation, `cannot start auth from state ${cur.state}`, 409);
     }
     enterAuth(accountId);
     ctx.sessions.transition(accountId, PROVIDER, "AUTH_IN_PROGRESS", {});
   };
 
-  app.post<{ Params: { id: string } }>("/api/sessions/:id/login", async (req) => {
-    const w = requireWorker();
-    const acct = ctx.accounts.get(req.params.id);
-    if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
-    const body = loginBody.parse(req.body ?? {});
-    canEnterAuth(acct.id);
+  /** Record a failed auth op back onto the session row (defensive: never
+   *  throws — a state bookkeeping issue must not mask the original error). */
+  const recordAuthFailure = (accountId: string, lastError: string): void => {
     try {
-      const r = await w.login(acct.id, {
-        timeoutSec: body.timeoutSec ?? 600,
-        headless: body.headless ?? false,
-        browser: body.browser,
-      });
-      const mismatch = mismatchFor(acct.id, r.email);
-      if (mismatch) {
-        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", { lastError: mismatch });
-        throw new ApiError(ApiCodes.conflict, mismatch, 409);
+      const cur = ctx.sessions.get(accountId, PROVIDER);
+      if (cur && cur.state !== "AUTH_REQUIRED") {
+        ctx.sessions.transition(accountId, PROVIDER, "AUTH_REQUIRED", { lastError });
       }
-      const s = ctx.sessions.transition(acct.id, PROVIDER, "AUTHENTICATED", {
-        email: r.email,
-        verified: true,
-      });
-      syncAccountIdentity(acct.id, r.email);
-      return { session: s, email: r.email };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const cur = ctx.sessions.get(acct.id, PROVIDER);
-      if (cur && cur.state === "AUTH_IN_PROGRESS") {
-        ctx.sessions.transition(acct.id, PROVIDER, "AUTH_REQUIRED", {
-          lastError: msg.slice(0, 500),
-        });
-      }
-      throw new ApiError(ApiCodes.unauthorized, `login failed: ${msg.slice(0, 300)}`, 401);
-    } finally {
-      leaveAuth(acct.id);
+    } catch {
+      /* bookkeeping only */
     }
-  });
-
-  // --- import cookies from an installed, non-automated browser --------------
-  // Google's bot detection rejects sign-in inside the fresh Playwright
-  // browser this app launches ("This browser or app may not be secure").
-  // This route is the supported alternative: the user signs in with their
-  // normal Chrome/Firefox once, and the app copies that session locally via
-  // the installed notebooklm-py CLI, then verifies it against the REAL
-  // service. Browser selection is an allowlist — the client never chooses an
-  // executable or a path. NOTE: the cookie JAR read itself does not traverse
-  // our tunnel (it is a local disk read); the CLI's verification step and all
-  // later NotebookLM requests do.
-  const BROWSER_COOKIE_OPTIONS: readonly string[] = [
-    "auto",
-    "chrome",
-    "firefox",
-    "chromium",
-    "brave",
-    "edge",
-    "opera",
-    "vivaldi",
-    "librewolf",
-    "zen",
-    "cachy",
-  ];
-
-  const browserImportBody = z.object({
-    /** Allowlisted browser name; Chromium profiles via "chrome::Profile 1". */
-    browser: z
-      .string()
-      .min(1)
-      .max(80)
-      .refine((b) => BROWSER_COOKIE_OPTIONS.includes(b.split("::", 1)[0]!.trim().toLowerCase()), {
-        message: "browser is not an allowed cookie source",
-      }),
-    /** Pick a signed-in Google account by email (multiple accounts). */
-    account: z.string().min(3).max(200).optional(),
-    timeoutSec: z.number().int().min(30).max(600).optional(),
-  });
-
-  app.post<{ Params: { id: string } }>("/api/sessions/:id/browser-import", async (req) => {
-    const w = requireWorker();
-    const acct = ctx.accounts.get(req.params.id);
-    if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
-    const body = browserImportBody.parse(req.body ?? {});
-    canEnterAuth(acct.id);
-    try {
-      const r = await w.browserImport(acct.id, {
-        browser: body.browser,
-        account: body.account,
-        timeoutSec: body.timeoutSec ?? 180,
-      });
-      const mismatch = mismatchFor(acct.id, r.email);
-      if (mismatch) {
-        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", { lastError: mismatch });
-        throw new ApiError(ApiCodes.conflict, mismatch, 409);
-      }
-      const s = ctx.sessions.transition(acct.id, PROVIDER, "AUTHENTICATED", {
-        email: r.email,
-        verified: true,
-      });
-      syncAccountIdentity(acct.id, r.email);
-      return {
-        session: s,
-        email: r.email,
-        routingNote:
-          "cookie jar read from your local browser (direct); the session verification and all NotebookLM requests use the configured tunnel",
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const cur = ctx.sessions.get(acct.id, PROVIDER);
-      if (cur && cur.state === "AUTH_IN_PROGRESS") {
-        ctx.sessions.transition(acct.id, PROVIDER, "AUTH_REQUIRED", {
-          lastError: msg.slice(0, 500),
-        });
-      }
-      if (err instanceof ApiError && err.httpStatus === 409) throw err;
-      throw new ApiError(ApiCodes.unauthorized, `browser import failed: ${msg.slice(0, 300)}`, 401);
-    } finally {
-      leaveAuth(acct.id);
-    }
-  });
+  };
 
   // --- verify against the real service --------------------------------------
   const verifyHandler = async (
@@ -316,34 +211,63 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
   ) => {
     const w = requireWorker();
     const acct = ctx.accounts.getOrThrow(req.params.id);
-    return verifyAccount(w, acct.id);
+    try {
+      return await verifyAccount(w, acct.id);
+    } catch (e) {
+      // A hard provider error during a live check (worker down, package
+      // hard-fail) is a client-visible check failure, not a 500.
+      const msg = e instanceof Error ? e.message : String(e);
+      recordAuthFailure(acct.id, msg);
+      throw new ApiError(ApiCodes.conflict, `verification failed: ${msg}`, 409);
+    }
   };
   app.post<{ Params: { id: string } }>("/api/sessions/:id/verify", verifyHandler);
   // refresh is semantically the same check (the service decides)
   app.post<{ Params: { id: string } }>("/api/sessions/:id/refresh", verifyHandler);
 
-  // --- import a storage-state JSON ------------------------------------------
-  const importBody = z.object({
-    base64: z.string().min(16).max(MAX_IMPORT_BYTES).optional(),
-    serverPath: z.string().min(1).max(1024).optional(),
-  });
+  // --- import: paste cookies from your own browser (the only auth path) -------
+  // Accepted input (auto-detected, in order):
+  //   1. Playwright storage state  {"cookies":[...], "origins":[...]}
+  //   2. a JSON cookie array       [{"domain":".google.com", ...}, ...]
+  //   3. a Netscape cookies.txt    "#HttpOnly_.google.com\tTRUE\t/\tTRUE\t...\tNAME\tVAL"
+  // Input arrives as `cookies` (raw text) or `base64` (base64 of that text) —
+  // the UI sends plain text as base64 so arbitrary cookie bytes survive JSON
+  // transport. The parsed document is FILTERED to google.com cookies, written
+  // 0600, and verified against the REAL service (tunnel-routed) before the
+  // account may be used. Re-import from any state is allowed (renewing an
+  // expired session is the main reason to import again).
+  const importBody = z
+    .object({
+      cookies: z.string().min(1).max(MAX_IMPORT_BYTES).optional(),
+      base64: z
+        .string()
+        .min(16)
+        .max(MAX_IMPORT_BYTES * 4)
+        .optional(),
+      serverPath: z.string().min(1).max(1024).optional(),
+    })
+    .refine(
+      (b) => Boolean(b.cookies) || Boolean(b.base64) || Boolean(b.serverPath),
+      "provide cookies, base64, or serverPath",
+    );
 
   app.post<{ Params: { id: string } }>("/api/sessions/:id/import", async (req) => {
     const w = requireWorker();
     const acct = ctx.accounts.getOrThrow(req.params.id);
     const body = importBody.parse(req.body);
-    if (!body.base64 && !body.serverPath) {
-      throw new ApiError(ApiCodes.validation, "provide base64 or serverPath", 400);
-    }
 
-    // Extract + validate the JSON BEFORE touching the destination.
-    let raw: Buffer;
-    if (body.base64) {
-      raw = Buffer.from(body.base64, "base64");
+    // --- extract the raw text ------------------------------------------------
+    let text: string;
+    if (body.cookies !== undefined) {
+      text = body.cookies;
+    } else if (body.base64 !== undefined) {
+      const raw = Buffer.from(body.base64, "base64");
       if (raw.byteLength > MAX_IMPORT_BYTES) {
-        throw new ApiError(ApiCodes.validation, "storage state too large", 400);
+        throw new ApiError(ApiCodes.validation, "cookie input too large (max 2 MiB)", 400);
       }
+      text = raw.toString("utf8");
     } else {
+      // serverPath: operator-only convenience (file on THIS machine, size-checked).
       const p = path.resolve(body.serverPath!);
       const st = statSync(p);
       if (!st.isFile() || st.size > MAX_IMPORT_BYTES) {
@@ -353,36 +277,57 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
           400,
         );
       }
-      raw = await readFile(p);
+      text = (await readFile(p)).toString("utf8");
     }
-    let parsed: unknown;
+
+    // --- parse + filter BEFORE touching the destination ----------------------
+    let parsed;
     try {
-      parsed = JSON.parse(raw.toString("utf8"));
-    } catch {
-      throw new ApiError(ApiCodes.validation, "storage state is not valid JSON", 400);
+      parsed = parsePastedCookies(text);
+    } catch (e) {
+      const msg = e instanceof CookieImportError ? e.message : "unrecognized cookie format";
+      throw new ApiError(ApiCodes.validation, msg, 400);
     }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !Array.isArray((parsed as { cookies?: unknown }).cookies)
-    ) {
-      throw new ApiError(ApiCodes.validation, "storage state must contain a cookies array", 400);
-    }
+    const stateJson = toStorageState(parsed);
 
     const dest = w.sessionPathFor(acct.id);
     await mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
-    await writeFile(dest, raw);
+    await writeFile(dest, stateJson);
     await chmod(dest, 0o600);
 
-    // The service's verdict decides the state.
-    const r = await verifyAccount(w, acct.id);
-    if (!r.ok) {
-      ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", {
-        lastError: r.detail ?? "imported session rejected by service",
-      });
-      return { ...r, note: "file stored, but the service rejected it" };
+    // --- the service's verdict decides the state ------------------------------
+    // verifyAccount performs its own transitions from AUTH_IN_PROGRESS:
+    //  success  -> AUTHENTICATED (+ account identity sync)
+    //  rejected -> AUTH_REQUIRED (session.lastError carries the reason)
+    canEnterAuth(acct.id);
+    try {
+      let r: Awaited<ReturnType<typeof verifyAccount>>;
+      try {
+        r = await verifyAccount(w, acct.id);
+      } catch (e) {
+        // The provider surfaced a HARD error while the service checked the
+        // imported session (e.g. notebooklm-py rejected the cookie set:
+        // "missing required cookies"). That is a rejected import, not a
+        // server fault: keep the stored file, return to AUTH_REQUIRED with
+        // the reason, and report a clean 409 (never a 500).
+        const msg = e instanceof Error ? e.message : String(e);
+        recordAuthFailure(acct.id, msg);
+        throw new ApiError(ApiCodes.conflict, `imported session rejected: ${msg}`, 409);
+      }
+      if (!r.ok) {
+        return { ...r, note: "file stored, but the service rejected it" };
+      }
+      if (r.mismatch) {
+        // Verified, but the identity is someone else: never green.
+        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", {
+          lastError: r.detail ?? "identity mismatch",
+        });
+        throw new ApiError(ApiCodes.conflict, r.detail ?? "identity mismatch", 409);
+      }
+      return r;
+    } finally {
+      leaveAuth(acct.id);
     }
-    return r;
   });
 
   // --- logout ----------------------------------------------------------------

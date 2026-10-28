@@ -81,7 +81,7 @@ describe("accounts", () => {
       method: "POST",
       url: "/api/accounts",
       headers: auth,
-      payload: { label: "work", displayEmail: "w@example.com" },
+      payload: { email: "w@example.com" },
     });
     expect(created.statusCode).toBe(201);
     const acc = created.json();
@@ -117,7 +117,7 @@ describe("accounts", () => {
         method: "POST",
         url: "/api/accounts",
         headers: auth,
-        payload: { label: "def-a" },
+        payload: { email: "def-a@example.com" },
       })
     ).json();
     const b = (
@@ -125,7 +125,7 @@ describe("accounts", () => {
         method: "POST",
         url: "/api/accounts",
         headers: auth,
-        payload: { label: "def-b" },
+        payload: { email: "def-b@example.com" },
       })
     ).json();
 
@@ -172,66 +172,81 @@ describe("accounts", () => {
     expect(bad.statusCode).toBeGreaterThanOrEqual(400);
   });
 
-  it("rejects browser-import for disallowed browsers and unknown accounts", async () => {
+  it("rejects malformed cookie imports without touching the session (client errors)", async () => {
     const created = (
       await app.inject({
         method: "POST",
         url: "/api/accounts",
         headers: auth,
-        payload: { label: "bi-1" },
+        payload: { email: "ci-1@example.com" },
       })
     ).json();
 
-    // Disallowlist: the client must never pick an arbitrary executable.
-    for (const browser of ["/usr/bin/google-chrome", "iexplore", "chrome; rm -rf /"]) {
+    // No provider configured (mock): the worker guard fires (400) — the
+    // parsing layer is unit-tested in cookie-import.test.ts. Assert the
+    // envelope is a clean client error, never a 500, for empty input and
+    // for an unknown account.
+    for (const payload of [{}, { cookies: "   " }]) {
       const res = await app.inject({
         method: "POST",
-        url: `/api/sessions/${created.id}/browser-import`,
+        url: `/api/sessions/${created.id}/import`,
         headers: auth,
-        payload: { browser },
+        payload,
       });
-      expect(res.statusCode, browser).toBeGreaterThanOrEqual(400);
-      expect(res.statusCode, browser).toBeLessThan(500);
+      expect(res.statusCode).toBeGreaterThanOrEqual(400);
+      expect(res.statusCode).toBeLessThan(500);
     }
 
-    // Unknown account: in mock mode the provider guard (400) fires first
-    // (fail-closed); with the python-worker it is a clean 404. Either way:
-    // a client error, never 500.
     const res = await app.inject({
       method: "POST",
-      url: "/api/sessions/acc_missing/browser-import",
+      url: "/api/sessions/acc_missing/import",
       headers: auth,
-      payload: { browser: "chrome" },
+      payload: { cookies: "[]" },
     });
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
     expect(res.statusCode).toBeLessThan(500);
   });
 
-  it("rejects duplicate labels with a conflict-free envelope (no raw error leak)", async () => {
+  it("rejects duplicate emails with a conflict-free envelope (no raw error leak)", async () => {
     await app.inject({
       method: "POST",
       url: "/api/accounts",
       headers: auth,
-      payload: { label: "dup" },
+      payload: { email: "dup@example.com" },
     });
     const dup = await app.inject({
       method: "POST",
       url: "/api/accounts",
       headers: auth,
-      payload: { label: "dup" },
+      payload: { email: "DUP@example.com" }, // uniqueness is case-insensitive
     });
-    expect(dup.statusCode).toBeGreaterThanOrEqual(400);
+    expect(dup.statusCode).toBe(409);
     const body = dup.json();
-    expect(body.error).toBeDefined();
-    expect(body.error.code).toBeDefined();
-    expect(JSON.stringify(body)).not.toContain("account label already exists");
+    expect(body.error.code).toBe("conflict");
+    // no raw repo error and no PII leak
+    expect(JSON.stringify(body)).not.toContain("already exists: dup@example.com");
+    expect(JSON.stringify(body)).not.toContain("dup@example.com");
   });
 });
 
 describe("jobs", () => {
   it("creates a job via multipart, lists it, and rejects bad extensions", async () => {
-    // Create job (prompt only, no audio).
-    const res = await mpInject(["prompt=hello"]);
+    const acc = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { email: "job@example.com" },
+      })
+    ).json();
+
+    // A job without an explicit account is rejected (no "automatic" account).
+    const noAccount = await mpInject(["prompt=hello"]);
+    expect(noAccount.statusCode).toBe(400);
+    expect(noAccount.json().error.code).toBe("validation_error");
+
+    // Create job (prompt only, no audio), with an explicit account.
+    const res = await mpInject(["prompt=hello", `preferredAccountId=${acc.id}`]);
     expect(res.statusCode).toBe(201);
     const job = res.json();
     expect(job.id).toMatch(/^j_[0-9a-f]{32}$/);
@@ -253,6 +268,7 @@ describe("jobs", () => {
     // Unsupported extension rejected.
     const bad = await mpInject([
       "prompt=hello",
+      `preferredAccountId=${acc.id}`,
       { field: "audio", filename: "evil.exe", bytes: Buffer.from("x") },
     ]);
     expect(bad.statusCode).toBe(400);
@@ -264,8 +280,17 @@ describe("jobs", () => {
   });
 
   it("stores an uploaded wav into the job archive", async () => {
+    const acc = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { email: "wav@example.com" },
+      })
+    ).json();
     const res = await mpInject([
       "prompt=transcribe",
+      `preferredAccountId=${acc.id}`,
       {
         field: "audio",
         filename: "talk.wav",
@@ -304,13 +329,46 @@ describe("jobs", () => {
     expect(cancel.statusCode).toBe(200);
     expect(cancel.json().status).toBe("CANCELLED"); // CREATED -> CANCELLED directly
 
-    // Terminal job: requeue is rejected.
+    // Cancelled job: requeue is rejected (CANCELLED has no way out).
     const requeue = await app.inject({
       method: "POST",
       url: `/api/jobs/${job.id}/requeue`,
       headers: auth,
     });
     expect(requeue.statusCode).toBe(409);
+  });
+
+  it("FAILED jobs can be retried: reset attempt budget, clear error + node", async () => {
+    const { id: nodeId } = addNode(ctx.proxies, ctx.vault, "retry-node");
+    const job = ctx.jobs.create({
+      input: {
+        prompt: "x",
+        audio: { originalName: "", mediaType: "", size: 0, sha256: "", providerConfirmed: false },
+        preferredAccountId: null,
+        preferredNodeId: null,
+      },
+      configSnapshot: {},
+    });
+    ctx.jobs.setStatus(job.id, "VALIDATING");
+    ctx.jobs.setStatus(job.id, "FAILED", {
+      errorClass: "auth",
+      errorMessage: "session not verified",
+      attempt: 2,
+      nodeId,
+    });
+    const retried = await app.inject({
+      method: "POST",
+      url: `/api/jobs/${job.id}/requeue`,
+      headers: auth,
+    });
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json().status).toBe("QUEUED");
+    const after = ctx.jobs.get(job.id)!;
+    expect(after.attempt).toBe(0);
+    expect(after.errorClass).toBeNull();
+    expect(after.errorMessage).toBeNull();
+    expect(after.nodeId).toBeNull();
+    expect(after.input.preferredAccountId).toBeNull(); // same inputs preserved
   });
 });
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import type { FailureClass } from "@nlo/shared";
 import {
@@ -26,8 +26,10 @@ import { isAmbiguousCode } from "./protocol.js";
  * Session model:
  *  - Each account owns ONE storage-state file under `sessionDir` (0600):
  *        sessionDir/nlo-<accountId>.json
- *  - The file is produced by the `login` op (interactive Playwright) or by
- *    importing an existing storage_state.json. It is NEVER served over HTTP.
+ *  - The file is produced by pasted-cookie import (the user signs into
+ *    NotebookLM in their own browser and copies the session cookies into
+ *    the UI; the server parses them into a storage state). It is NEVER
+ *    served over HTTP.
  *  - credentialRef format: "session:<accountId>".
  */
 /** Minimal structural view of a proxy selection (avoids a hard dependency
@@ -46,8 +48,6 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       dataDir: string;
       pythonBin?: string;
       workerPath?: string;
-      /** Browser channel for interactive login (chromium | chrome | msedge). */
-      loginBrowser?: string;
       /** Per-job hard timeout (default 30 min). */
       jobTimeoutMs?: number;
       /**
@@ -132,7 +132,6 @@ export class PythonWorkerProvider implements NotebookLMProvider {
   private async acquireAuthTunnel(): Promise<{
     nodeId: string;
     handle: { host: string; port: number } | null;
-    browserProxy: { server: string } | null;
   }> {
     const pm = this.opts.proxyManager;
     const repo = this.opts.proxiesRepo;
@@ -150,7 +149,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       this.log(
         "auth op proceeding with DIRECT egress (no proxy node configured; NLO_ALLOW_DIRECT_EGRESS=1)",
       );
-      return { nodeId: "", handle: null, browserProxy: null };
+      return { nodeId: "", handle: null };
     }
     // selectAuto self-heals stale health (10-min TTL passed) by running the
     // real staged check against the NotebookLM target before failing — the
@@ -160,11 +159,9 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     this.log(
       `auth op routed through node ${sel.node.config.name} (tunnel ${sel.handle.host}:${sel.handle.port})`,
     );
-    const server = `http://${sel.handle.host}:${sel.handle.port}`;
     return {
       nodeId: sel.node.id,
       handle: { host: sel.handle.host, port: sel.handle.port },
-      browserProxy: { server },
     };
   }
 
@@ -191,7 +188,6 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         note: "worker ping + import check",
       },
       getAccountStatus: { level: live, note: "verify against real service" },
-      login: { level: live, note: "interactive Playwright browser sign-in" },
       submitAudioJob: { level: live, note: "real upload + ask via notebooklm-py" },
       retrieveResult: { level: live, note: "real grounded answer" },
       retrieveArtifacts: {
@@ -216,9 +212,8 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       });
       const info = await w.start();
       if (!info.version) issues.push("notebooklm-py package not importable in worker python");
-      if (info.playwright === false) {
-        issues.push("playwright not installed (login op will fail until installed)");
-      }
+      // NOTE: playwright is NOT required — accounts authenticate via pasted
+      // cookies, and no app code launches a browser.
       await w.close();
       return { ok: issues.length === 0, issues };
     } catch (e) {
@@ -277,93 +272,6 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         ambiguous: isAmbiguousCode(code),
         needsReauth: false, // auth case already returned above
       });
-    } finally {
-      await w.close();
-    }
-  }
-
-  /** Interactive login: opens a browser; the user signs in; session saved 0600.
-   *
-   * The browser itself is routed through the verified tunnel (Playwright
-   * `proxy` launch option) — Chromium ignores HTTP(S)_PROXY env vars — and
-   * the post-login verification call uses the same tunnel. */
-  async login(
-    accountId: string,
-    opts: { timeoutSec?: number; headless?: boolean; browser?: string } = {},
-  ): Promise<{ email: string | null }> {
-    const sessionPath = this.sessionPathFor(accountId);
-    const tunnel = await this.acquireAuthTunnel();
-    const w = new WorkerSupervisor({
-      pythonBin: this.opts.pythonBin,
-      workerPath: this.opts.workerPath,
-      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
-      requestTimeoutMs: (opts.timeoutSec ?? 600) * 1000 + 120_000,
-      log: this.log,
-    });
-    try {
-      await w.start();
-      const r = await w.request<{ email: string | null }>("login", {
-        sessionPath,
-        timeoutSec: opts.timeoutSec ?? 600,
-        headless: opts.headless ?? false,
-        browser: opts.browser ?? this.opts.loginBrowser ?? "chromium",
-        proxy: tunnel.browserProxy,
-      });
-      try {
-        chmodSync(sessionPath, 0o600);
-      } catch {
-        /* best effort */
-      }
-      return { email: r.email ?? null };
-    } finally {
-      await w.close();
-    }
-  }
-
-  /**
-   * Import Google cookies from an installed, non-automated browser (Chrome,
-   * Firefox, …). This is the UI-friendly alternative to the Playwright login
-   * that Google's bot detection rejects: the user signs in with their normal
-   * browser once, and we copy the session locally through the installed
-   * notebooklm-py CLI. The resulting session is verified against the REAL
-   * service (through the tunnel) before this method returns.
-   *
-   * Routing honesty: the browser's cookie JAR is read from disk — the browser
-   * itself does NOT route through our tunnel for this operation. The CLI's
-   * verification step and all subsequent NotebookLM requests DO route through
-   * the tunnel (HTTPS_PROXY).
-   */
-  async browserImport(
-    accountId: string,
-    opts: {
-      browser: string;
-      account?: string;
-      timeoutSec?: number;
-    },
-  ): Promise<{ email: string | null }> {
-    const sessionPath = this.sessionPathFor(accountId);
-    const tunnel = await this.acquireAuthTunnel();
-    const w = new WorkerSupervisor({
-      pythonBin: this.opts.pythonBin,
-      workerPath: this.opts.workerPath,
-      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
-      requestTimeoutMs: (opts.timeoutSec ?? 180) * 1000 + 120_000,
-      log: this.log,
-    });
-    try {
-      await w.start();
-      const r = await w.request<{ email: string | null; notebooks: number }>("browser-import", {
-        sessionPath,
-        browser: opts.browser,
-        account: opts.account,
-        timeoutSec: opts.timeoutSec ?? 180,
-      });
-      try {
-        chmodSync(sessionPath, 0o600);
-      } catch {
-        /* best effort */
-      }
-      return { email: r.email ?? null };
     } finally {
       await w.close();
     }

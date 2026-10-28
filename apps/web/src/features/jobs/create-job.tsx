@@ -72,7 +72,7 @@ export function CreateJobPage() {
     setFile(f);
   };
 
-  const canSubmit = prompt.trim().length > 0 && !submitting;
+  const canSubmit = prompt.trim().length > 0 && accountId !== "" && !submitting;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,7 +84,7 @@ export function CreateJobPage() {
         title: title.trim() || undefined,
         prompt: prompt.trim(),
         audio: file,
-        preferredAccountId: accountId || null,
+        preferredAccountId: accountId,
         preferredNodeId: nodeId || null,
       });
       toast({
@@ -189,28 +189,19 @@ export function CreateJobPage() {
                 htmlFor="account"
                 hint={
                   accounts.length === 0
-                    ? "حسابی ثبت نشده است."
-                    : "حساب انتخابی باید جلسه‌ی تأییدشده داشته باشد؛ در غیر این صورت کار به همان دلیل نامی‌شده شکست می‌خورد."
+                    ? "حسابی ثبت نشده است؛ ابتدا در صفحه‌ی حساب‌ها یک حساب بسازید."
+                    : "انتخاب الزامی است: نوت‌بوک با همین حساب ساخته می‌شود. حساب انتخابی باید جلسه‌ی تأییدشده داشته باشد."
                 }
               >
                 <Select
                   id="account"
                   value={accountId}
                   onChange={(e) => setAccountId(e.target.value)}
-                  placeholder="خودکار"
-                  options={[
-                    { value: "", label: "خودکار (پیش‌فرض، سپس تازه‌ترین)" },
-                    ...accounts.map((a) => ({
-                      value: a.id,
-                      label:
-                        `${a.label}${a.isDefault ? " — پیش‌فرض" : ""}` +
-                        (a.enabled
-                          ? a.status !== "ACTIVE"
-                            ? ` — ${a.status}`
-                            : ""
-                          : " — غیرفعال"),
-                    })),
-                  ]}
+                  placeholder="انتخاب حساب"
+                  options={accounts.map((a) => ({
+                    value: a.id,
+                    label: a.displayEmail || a.label,
+                  }))}
                 />
               </Field>
               <Field

@@ -32,10 +32,17 @@ describe("job state machine", () => {
     expect(canTransition("CREATED", "SUCCEEDED")).toBe(false);
   });
 
-  it("rejects transitions out of terminal states", () => {
+  it("rejects transitions out of terminal states (except the operator retry FAILED -> QUEUED)", () => {
     for (const t of ["SUCCEEDED", "FAILED", "CANCELLED"] as JobStatus[]) {
       expect(isTerminal(t)).toBe(true);
-      expect(() => transition(t, "QUEUED")).toThrow(InvalidStateTransitionError);
+      if (t === "FAILED") {
+        // explicit operator retry is the only way out of FAILED
+        expect(canTransition("FAILED", "QUEUED")).toBe(true);
+        expect(() => transition("FAILED", "RUNNING")).toThrow(InvalidStateTransitionError);
+        expect(() => transition("FAILED", "CANCELLED")).toThrow(InvalidStateTransitionError);
+      } else {
+        expect(() => transition(t, "QUEUED")).toThrow(InvalidStateTransitionError);
+      }
     }
   });
 

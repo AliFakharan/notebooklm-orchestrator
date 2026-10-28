@@ -27,15 +27,17 @@ const VALID_STATUS = ["ACTIVE", "DEGRADED", "RATE_LIMITED", "AUTH_REQUIRED", "DI
 export class AccountsRepo {
   constructor(private readonly db: Db) {}
 
-  create(input: {
-    label: string;
-    displayEmail?: string;
-    authSecretRef?: string | null;
-  }): AccountRow {
-    const label = input.label.trim();
-    if (!label) throw new Error("label is required");
-    const dup = this.db.raw.prepare("SELECT 1 AS x FROM accounts WHERE label = ?").get(label);
-    if (dup) throw new Error(`account label already exists: ${label}`);
+  /**
+   * The account's email IS its identity: the label always equals the email,
+   * and the email must be unique across accounts.
+   */
+  create(input: { email: string; authSecretRef?: string | null }): AccountRow {
+    const email = input.email.trim().toLowerCase();
+    if (!email) throw new Error("email is required");
+    const dup = this.db.raw
+      .prepare("SELECT 1 AS x FROM accounts WHERE display_email = ?")
+      .get(email);
+    if (dup) throw new Error(`account email already exists: ${email}`);
 
     const now = this.db.now();
     const id = `acc_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -44,16 +46,7 @@ export class AccountsRepo {
         `INSERT INTO accounts (id, label, display_email, status, enabled, auth_secret_ref, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?)`,
       )
-      .run(
-        id,
-        label,
-        (input.displayEmail ?? "").trim(),
-        "UNKNOWN",
-        1,
-        input.authSecretRef ?? null,
-        now,
-        now,
-      );
+      .run(id, email, email, "UNKNOWN", 1, input.authSecretRef ?? null, now, now);
     return this.getOrThrow(id);
   }
 
@@ -80,7 +73,6 @@ export class AccountsRepo {
     patch: Partial<
       Pick<
         AccountRow,
-        | "label"
         | "displayEmail"
         | "status"
         | "enabled"
@@ -95,9 +87,16 @@ export class AccountsRepo {
     if (patch.status && !VALID_STATUS.includes(patch.status)) {
       throw new Error(`invalid account status: ${patch.status}`);
     }
+    const email = (patch.displayEmail ?? current.displayEmail).trim().toLowerCase();
+    if (email !== current.displayEmail) {
+      const dup = this.db.raw
+        .prepare("SELECT 1 AS x FROM accounts WHERE display_email = ? AND id <> ?")
+        .get(email, id);
+      if (dup) throw new Error(`account email already exists: ${email}`);
+    }
     const next = {
-      label: patch.label ?? current.label,
-      displayEmail: patch.displayEmail ?? current.displayEmail,
+      label: email, // the label is always the email
+      displayEmail: email,
       status: patch.status ?? current.status,
       enabled: patch.enabled ?? current.enabled,
       authSecretRef:
