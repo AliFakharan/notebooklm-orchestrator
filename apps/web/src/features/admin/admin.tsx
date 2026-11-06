@@ -1,24 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import { Cable, LockKeyhole, LogOut } from "lucide-react";
-import { adminLogin, adminLogout, adminMe, type AdminStatus } from "@/lib/api";
+import { LockKeyhole } from "lucide-react";
+import { adminLogin, adminMe, type AdminStatus } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AccountsPage } from "@/features/accounts/accounts";
 import { ProxiesPage } from "@/features/proxies/proxies";
 
 /**
- * زیرساخت — the admin-gated section (accounts + proxies).
- *
- * The infrastructure API (accounts/proxies/sessions) is protected by an
- * HttpOnly cookie session created via `POST /api/admin/login` (user/pass from
- * env). This page checks `GET /api/admin/me`: unauthenticated visitors see the
- * login form; authenticated ones get the two tabs (حساب‌ها / پراکسی‌ها) and a
- * logout action.
+ * Standalone admin pages — rendered OUTSIDE the main app layout (no sidebar),
+ * so the regular app (نمای کلی / درخواست جدید / تاریخچه) is not reachable from
+ * here. There is no link to these pages anywhere in the main UI; the only way
+ * in is typing the URL. Access is gated by the admin cookie: unauthenticated
+ * visitors see the login form, authenticated ones see the page directly.
  */
-export function AdminPage() {
+function AdminShell({ title, children }: { title: string; children: React.ReactNode }) {
   const [status, setStatus] = useState<AdminStatus | null>(null);
 
   const load = useCallback(async () => {
@@ -35,41 +32,47 @@ export function AdminPage() {
 
   if (!status) {
     return (
-      <div className="flex flex-col gap-3">
+      <div className="flex min-h-screen flex-col gap-4 p-4">
         <Skeleton className="h-40 w-full" />
       </div>
     );
   }
 
   if (!status.authenticated) {
-    return <LoginGate onAuthenticated={() => setStatus({ enabled: true, authenticated: true })} />;
+    return (
+      <div className="flex min-h-screen items-center justify-center p-4">
+        <LoginGate onAuthenticated={() => setStatus({ enabled: true, authenticated: true })} />
+      </div>
+    );
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-xs text-muted-foreground">بخش خصوصی: مدیریت حساب‌ها و پراکسی‌ها.</p>
-        <Button variant="outline" size="sm" onClick={() => void adminLogout().then(load)}>
-          <LogOut />
-          خروج
-        </Button>
-      </div>
-      <Tabs defaultValue="accounts">
-        <TabsList aria-label="بخش‌های زیرساخت">
-          <TabsTrigger value="accounts">حساب‌ها</TabsTrigger>
-          <TabsTrigger value="proxies">
-            <Cable className="size-3.5" />
-            پراکسی‌ها
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="accounts" className="mt-4">
-          <AccountsPage />
-        </TabsContent>
-        <TabsContent value="proxies" className="mt-4">
-          <ProxiesPage />
-        </TabsContent>
-      </Tabs>
+    <div className="flex min-h-screen flex-col gap-4 p-4">
+      <header className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
+        <h1 className="min-w-0 truncate text-sm font-semibold" aria-live="polite">
+          {title}
+        </h1>
+      </header>
+      <main className="min-w-0 flex-1">{children}</main>
     </div>
+  );
+}
+
+/** /admin/accounts — the accounts page behind the admin gate. */
+export function AdminAccountsPage() {
+  return (
+    <AdminShell title="حساب‌ها">
+      <AccountsPage />
+    </AdminShell>
+  );
+}
+
+/** /admin/proxies — the proxies page behind the admin gate. */
+export function AdminProxiesPage() {
+  return (
+    <AdminShell title="پراکسی‌ها">
+      <ProxiesPage />
+    </AdminShell>
   );
 }
 
@@ -98,7 +101,7 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: () => void }) {
   };
 
   return (
-    <div className="mx-auto max-w-sm">
+    <div className="w-full max-w-sm">
       <Card>
         <CardHeader>
           <CardTitle>ورود به بخش زیرساخت</CardTitle>

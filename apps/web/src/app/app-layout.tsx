@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { AudioLines, Gauge, LockKeyhole, PlusCircle, Radio } from "lucide-react";
+import { AudioLines, Gauge, PlusCircle, Radio } from "lucide-react";
 import { Sidebar, SidebarGroup, SidebarItem } from "@/components/ui/sidebar";
 
 const NAV = [
@@ -7,12 +7,6 @@ const NAV = [
   { to: "/new", label: "درخواست جدید", icon: PlusCircle, end: false },
   { to: "/jobs", label: "تاریخچه‌ی درخواست‌ها", icon: Radio, end: false },
 ];
-
-/**
- * Infrastructure (accounts + proxies) is admin-gated: a single link to
- * /admin, where the user logs in before seeing either section.
- */
-const INFRA = [{ to: "/admin", label: "زیرساخت", icon: LockKeyhole, end: false }];
 
 function NavLinkItem({
   to,
@@ -60,11 +54,6 @@ export function AppLayout() {
             <NavLinkItem key={n.to} {...n} />
           ))}
         </SidebarGroup>
-        <SidebarGroup title="زیرساخت">
-          {INFRA.map((n) => (
-            <NavLinkItem key={n.to} {...n} />
-          ))}
-        </SidebarGroup>
       </Sidebar>
 
       <div className="flex min-w-0 flex-1 flex-col gap-4">
@@ -87,6 +76,5 @@ function navTitle(path: string): string {
   if (path === "/new") return "درخواست پردازش جدید";
   if (path.startsWith("/jobs/")) return "جزئیات درخواست";
   if (path === "/jobs") return "تاریخچه‌ی درخواست‌ها";
-  if (path === "/admin") return "زیرساخت (حساب‌ها و پراکسی‌ها)";
   return "پنل مدیریت";
 }

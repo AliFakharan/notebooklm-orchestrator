@@ -216,14 +216,8 @@ export function DashboardPage() {
         </Card>
 
         <Card>
-          <CardHeader className="flex-row items-center justify-between">
+          <CardHeader>
             <CardTitle>زیرساخت</CardTitle>
-            <Link to="/admin">
-              <Button variant="ghost" size="sm">
-                <Cable />
-                مدیریت
-              </Button>
-            </Link>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             {loading || !data ? (
@@ -235,12 +229,7 @@ export function DashboardPage() {
               <EmptyState
                 icon={<Cable className="size-6" />}
                 title="زیرساخت قفل است"
-                description="برای دیدن حساب‌ها و پراکسی‌ها وارد بخش مدیریت شوید (نام کاربری و رمز)."
-                action={
-                  <Link to="/admin">
-                    <Button size="sm">ورود به زیرساخت</Button>
-                  </Link>
-                }
+                description="حساب‌ها و پراکسی‌ها در بخش خصوصی مدیریت هستند و با رمز عبور در دسترسند."
               />
             ) : (
               <>

@@ -5,7 +5,7 @@ import { DashboardPage } from "@/features/dashboard/dashboard";
 import { CreateJobPage } from "@/features/jobs/create-job";
 import { JobHistoryPage } from "@/features/jobs/job-history";
 import { JobDetailsPage } from "@/features/jobs/job-details";
-import { AdminPage } from "@/features/admin/admin";
+import { AdminAccountsPage, AdminProxiesPage } from "@/features/admin/admin";
 
 /**
  * Application root: local single-user app (no login — the server is
@@ -17,15 +17,16 @@ export function App() {
     <ToastProvider>
       <BrowserRouter>
         <Routes>
+          {/* Standalone admin pages: OUTSIDE the main layout (no sidebar, no
+              links back to the regular app). Only reachable by URL. */}
+          <Route path="/admin" element={<Navigate to="/admin/accounts" replace />} />
+          <Route path="/admin/accounts" element={<AdminAccountsPage />} />
+          <Route path="/admin/proxies" element={<AdminProxiesPage />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/new" element={<CreateJobPage />} />
             <Route path="/jobs" element={<JobHistoryPage />} />
             <Route path="/jobs/:id" element={<JobDetailsPage />} />
-            <Route path="/admin" element={<AdminPage />} />
-            {/* Legacy direct links now land on the gated admin section. */}
-            <Route path="/accounts" element={<Navigate to="/admin" replace />} />
-            <Route path="/proxies" element={<Navigate to="/admin" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
