@@ -15,6 +15,7 @@ import { ProxyManager } from "./proxy/proxy-manager.js";
 import { fetchThroughTunnel } from "./proxy/connect-proxy.js";
 import { JobRunner } from "./queue/job-runner.js";
 import { Queue } from "./queue/queue.js";
+import { createAdminAuth, type AdminAuth } from "./api/admin-auth.js";
 
 /**
  * AppContext: composes all services from configuration.
@@ -34,6 +35,8 @@ export interface AppContext {
   proxyManager: ProxyManager;
   runner: JobRunner;
   queue: Queue;
+  /** Admin gate for the infrastructure API (disabled unless env credentials set). */
+  adminAuth: AdminAuth;
   close(): Promise<void>;
 }
 
@@ -167,6 +170,7 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     proxyManager,
     runner,
     queue,
+    adminAuth: createAdminAuth(config),
     close: async () => {
       await queue.stop();
       (provider as { dispose?: () => void }).dispose?.();

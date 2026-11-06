@@ -14,6 +14,14 @@ export interface AppConfig {
   liveTestsEnabled: boolean;
   /** SSRF allowlist for health checks (host[:port] entries). */
   healthAllowlist: string[];
+  /**
+   * Admin gate for the infrastructure API (accounts / proxies / sessions).
+   * `enabled` is true only when BOTH NLO_ADMIN_USER and NLO_ADMIN_PASSWORD are
+   * set; when disabled the infrastructure endpoints stay open (backward
+   * compatible, e.g. for local mock/dev). The admin password is a secret and
+   * is never logged.
+   */
+  admin: { user: string; password: string; enabled: boolean };
   /** Python interpreter for the notebooklm worker (default "python3"). */
   pythonBin: string;
   /**
@@ -132,6 +140,12 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     allowedAudioExtensions,
     liveTestsEnabled: boolEnv("NLO_LIVE_TESTS", false),
     healthAllowlist,
+    admin: {
+      user: env("NLO_ADMIN_USER") ?? "",
+      password: env("NLO_ADMIN_PASSWORD") ?? "",
+      enabled:
+        (env("NLO_ADMIN_USER") ?? "").length > 0 && (env("NLO_ADMIN_PASSWORD") ?? "").length > 0,
+    },
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),

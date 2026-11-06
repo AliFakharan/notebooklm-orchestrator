@@ -75,6 +75,135 @@ describe("health", () => {
   });
 });
 
+describe("admin gate", () => {
+  // A second app instance with admin credentials configured: the
+  // infrastructure API must require a session cookie, while /api/admin/*
+  // and the public job/health routes stay open.
+  let adminCtx: AppContext;
+  let adminApp: FastifyInstance;
+  const ADMIN_USER = "admin";
+  const ADMIN_PASS = "correct-horse";
+
+  beforeEach(async () => {
+    adminCtx = await makeAppContext({
+      NLO_ADMIN_USER: ADMIN_USER,
+      NLO_ADMIN_PASSWORD: ADMIN_PASS,
+    });
+    adminApp = await buildApp(adminCtx);
+    await adminApp.ready();
+  });
+
+  afterEach(async () => {
+    await adminApp.close();
+    await adminCtx.close();
+  });
+
+  function setCookie(res: {
+    headers: Record<string, string | number | string[] | undefined>;
+  }): string | undefined {
+    const raw = res.headers["set-cookie"];
+    if (!raw) return undefined;
+    return Array.isArray(raw) ? raw[0] : typeof raw === "string" ? raw : undefined;
+  }
+
+  /** Just the name=value portion (the actual cookie value to send back). */
+  function cookieFrom(res: {
+    headers: Record<string, string | number | string[] | undefined>;
+  }): string | undefined {
+    const full = setCookie(res);
+    return full?.split(";")[0];
+  }
+
+  it("rejects infrastructure calls without a cookie, allows after login", async () => {
+    // Locked out before login.
+    const locked = await adminApp.inject({ method: "GET", url: "/api/accounts", headers: auth });
+    expect(locked.statusCode).toBe(401);
+    expect(locked.json().error.code).toBe("unauthorized");
+    const lockedProxy = await adminApp.inject({
+      method: "GET",
+      url: "/api/proxies",
+      headers: auth,
+    });
+    expect(lockedProxy.statusCode).toBe(401);
+
+    // Public routes are unaffected by the gate.
+    const jobs = await adminApp.inject({ method: "GET", url: "/api/jobs", headers: auth });
+    expect(jobs.statusCode).toBe(200);
+
+    // Wrong password is rejected.
+    const bad = await adminApp.inject({
+      method: "POST",
+      url: "/api/admin/login",
+      headers: { "content-type": "application/json" },
+      payload: { username: ADMIN_USER, password: "wrong" },
+    });
+    expect(bad.statusCode).toBe(401);
+    expect(cookieFrom(bad)).toBeUndefined();
+
+    // Wrong username is rejected too.
+    const badUser = await adminApp.inject({
+      method: "POST",
+      url: "/api/admin/login",
+      headers: { "content-type": "application/json" },
+      payload: { username: "nope", password: ADMIN_PASS },
+    });
+    expect(badUser.statusCode).toBe(401);
+
+    // Correct credentials issue a session cookie.
+    const ok = await adminApp.inject({
+      method: "POST",
+      url: "/api/admin/login",
+      headers: { "content-type": "application/json" },
+      payload: { username: ADMIN_USER, password: ADMIN_PASS },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().gated).toBe(true);
+    const setCookieValue = setCookie(ok);
+    expect(setCookieValue).toMatch(/^nlo_admin=[A-Za-z0-9_-]+/);
+    expect(setCookieValue).toContain("HttpOnly");
+    expect(setCookieValue).toContain("SameSite=Strict");
+    const cookie = cookieFrom(ok);
+    expect(cookie).toMatch(/^nlo_admin=[A-Za-z0-9_-]+$/);
+
+    // The cookie unlocks the infrastructure.
+    const unlocked = await adminApp.inject({
+      method: "GET",
+      url: "/api/accounts",
+      headers: { cookie },
+    });
+    expect(unlocked.statusCode).toBe(200);
+
+    // /api/admin/me reflects the session.
+    const me = await adminApp.inject({ method: "GET", url: "/api/admin/me", headers: { cookie } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toEqual({ enabled: true, authenticated: true });
+
+    // Logout clears the cookie and locks again.
+    const out = await adminApp.inject({
+      method: "POST",
+      url: "/api/admin/logout",
+      headers: { cookie },
+    });
+    expect(out.statusCode).toBe(200);
+    expect(setCookie(out)).toContain("Max-Age=0");
+    const after = await adminApp.inject({
+      method: "GET",
+      url: "/api/accounts",
+      headers: { cookie },
+    });
+    expect(after.statusCode).toBe(401);
+  });
+
+  it("is a no-op (gated:false) when no admin credentials are configured", async () => {
+    // The default app (this file's `app`) has no admin env: the login route
+    // short-circuits and the infrastructure stays open.
+    const me = await app.inject({ method: "GET", url: "/api/admin/me", headers: auth });
+    expect(me.json()).toEqual({ enabled: false, authenticated: true });
+    const accounts = await app.inject({ method: "GET", url: "/api/accounts", headers: auth });
+    expect(accounts.statusCode).toBe(200);
+  });
+});
+
 describe("accounts", () => {
   it("creates, lists, patches, and deletes an account (secrets never exposed)", async () => {
     const created = await app.inject({
@@ -231,6 +360,11 @@ describe("accounts", () => {
 
 describe("jobs", () => {
   it("creates a job via multipart, lists it, and rejects bad extensions", async () => {
+    // With no account registered, job creation is rejected up front.
+    const noAccount = await mpInject(["prompt=hello"]);
+    expect(noAccount.statusCode).toBe(400);
+    expect(noAccount.json().error.code).toBe("validation_error");
+
     const acc = (
       await app.inject({
         method: "POST",
@@ -240,13 +374,9 @@ describe("jobs", () => {
       })
     ).json();
 
-    // A job without an explicit account is rejected (no "automatic" account).
-    const noAccount = await mpInject(["prompt=hello"]);
-    expect(noAccount.statusCode).toBe(400);
-    expect(noAccount.json().error.code).toBe("validation_error");
-
-    // Create job (prompt only, no audio), with an explicit account.
-    const res = await mpInject(["prompt=hello", `preferredAccountId=${acc.id}`]);
+    // The account is chosen automatically (default account); the request no
+    // longer carries preferredAccountId.
+    const res = await mpInject(["prompt=hello"]);
     expect(res.statusCode).toBe(201);
     const job = res.json();
     expect(job.id).toMatch(/^j_[0-9a-f]{32}$/);
@@ -256,7 +386,7 @@ describe("jobs", () => {
     expect(list.statusCode).toBe(200);
     expect(list.json().items.some((j: { id: string }) => j.id === job.id)).toBe(true);
 
-    // A job detail endpoint returns it with its input.
+    // A job detail endpoint returns it with its input (account auto-picked).
     const detail = await app.inject({
       method: "GET",
       url: `/api/jobs/${job.id}`,
@@ -264,6 +394,7 @@ describe("jobs", () => {
     });
     expect(detail.statusCode).toBe(200);
     expect(detail.json().input.prompt).toBe("hello");
+    expect(detail.json().input.preferredAccountId).toBeNull(); // auto-selected at run time
 
     // Unsupported extension rejected.
     const bad = await mpInject([

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Cable, PlusCircle, Radio } from "lucide-react";
 import type { JobStatus } from "@nlo/shared";
-import { accountsList, jobsList, proxiesList, type MaskedProxyNode } from "@/lib/api";
+import { accountsList, jobsList, proxiesList, type Account, type MaskedProxyNode } from "@/lib/api";
 import { fa, faFileSize } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Stat } from "@/components/ui/stat";
@@ -38,10 +38,15 @@ interface DashboardData {
   items: Awaited<ReturnType<typeof jobsList>>["items"];
   inFlight: number;
   attention: number;
-  accountsTotal: number;
-  accountsReady: number;
-  proxiesTotal: number;
-  proxies: MaskedProxyNode[];
+  /** null when the infrastructure API is gated (not admin-logged-in). */
+  infra: {
+    accountsTotal: number;
+    accountsReady: number;
+    proxiesTotal: number;
+    proxies: MaskedProxyNode[];
+  } | null;
+  /** true when the infra endpoints returned 401 (admin gate). */
+  infraLocked: boolean;
 }
 
 /**
@@ -57,25 +62,37 @@ export function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [all, inflight, attention, accounts, proxies] = await Promise.all([
+      const [all, inflight, attention, accountsRes, proxiesRes] = await Promise.allSettled([
         jobsList({ limit: 8 }),
         jobsList({ status: INFLIGHT, limit: 200 }),
         jobsList({ status: ["NEEDS_ATTENTION"], limit: 200 }),
         accountsList(),
         proxiesList(),
       ]);
+      const first = (r: PromiseSettledResult<unknown>): unknown =>
+        r.status === "fulfilled" ? r.value : null;
+      const accounts = first(accountsRes) as Account[] | null;
+      const proxies = first(proxiesRes) as MaskedProxyNode[] | null;
+      const infraLocked = accountsRes.status === "rejected" || proxiesRes.status === "rejected";
       setData({
-        total: all.total,
-        items: all.items,
-        inFlight: inflight.total,
-        attention: attention.total,
-        accountsTotal: accounts.length,
-        accountsReady: accounts.filter((a) => a.status === "ACTIVE" && a.enabled).length,
-        proxiesTotal: proxies.length,
-        proxies,
+        total: (first(all) as { total: number } | null)?.total ?? 0,
+        items: (first(all) as { items: DashboardData["items"] } | null)?.items ?? [],
+        inFlight: (first(inflight) as { total: number } | null)?.total ?? 0,
+        attention: (first(attention) as { total: number } | null)?.total ?? 0,
+        infra:
+          accounts && proxies
+            ? {
+                accountsTotal: accounts.length,
+                accountsReady: accounts.filter((a) => a.status === "ACTIVE" && a.enabled).length,
+                proxiesTotal: proxies.length,
+                proxies,
+              }
+            : null,
+        infraLocked,
       });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "بارگذاری نشد.");
+      if (all.status === "rejected") {
+        setError(all.reason instanceof Error ? all.reason.message : "بارگذاری نشد.");
+      }
     } finally {
       setLoading(false);
     }
@@ -103,10 +120,10 @@ export function DashboardPage() {
             <Stat label="نیازمند بررسی" value={fa(data.attention)} />
             <Stat
               label="حساب‌های آماده"
-              value={fa(data.accountsReady)}
-              unit={`از ${fa(data.accountsTotal)}`}
+              value={data.infra ? fa(data.infra.accountsReady) : "—"}
+              unit={data.infra ? `از ${fa(data.infra.accountsTotal)}` : undefined}
             />
-            <Stat label="پراکسی‌ها" value={fa(data.proxiesTotal)} />
+            <Stat label="پراکسی‌ها" value={data.infra ? fa(data.infra.proxiesTotal) : "—"} />
           </>
         )}
       </div>
@@ -201,10 +218,10 @@ export function DashboardPage() {
         <Card>
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>زیرساخت</CardTitle>
-            <Link to="/proxies">
+            <Link to="/admin">
               <Button variant="ghost" size="sm">
                 <Cable />
-                پراکسی‌ها
+                مدیریت
               </Button>
             </Link>
           </CardHeader>
@@ -214,14 +231,25 @@ export function DashboardPage() {
                 <SkeletonRow shimmer />
                 <SkeletonRow shimmer />
               </div>
+            ) : !data.infra ? (
+              <EmptyState
+                icon={<Cable className="size-6" />}
+                title="زیرساخت قفل است"
+                description="برای دیدن حساب‌ها و پراکسی‌ها وارد بخش مدیریت شوید (نام کاربری و رمز)."
+                action={
+                  <Link to="/admin">
+                    <Button size="sm">ورود به زیرساخت</Button>
+                  </Link>
+                }
+              />
             ) : (
               <>
                 <p className="text-xs leading-6 text-muted-foreground">
-                  {data.accountsTotal === 0
+                  {data.infra.accountsTotal === 0
                     ? "حسابی ثبت نشده است؛ برای پردازش حداقل یک حساب لازم است."
-                    : `${fa(data.accountsReady)} از ${fa(data.accountsTotal)} حساب آماده‌ی پردازش است.`}
+                    : `${fa(data.infra.accountsReady)} از ${fa(data.infra.accountsTotal)} حساب آماده‌ی پردازش است.`}
                 </p>
-                {data.proxies.length === 0 ? (
+                {data.infra.proxies.length === 0 ? (
                   <EmptyState
                     icon={<Cable className="size-6" />}
                     title="پراکسی‌ای تعریف نشده"
@@ -229,7 +257,7 @@ export function DashboardPage() {
                   />
                 ) : (
                   <ul className="flex flex-col gap-2">
-                    {data.proxies.slice(0, 4).map((p) => (
+                    {data.infra.proxies.slice(0, 4).map((p) => (
                       <li key={p.id} className="flex items-center justify-between gap-2 text-sm">
                         <span className="truncate">{p.config.name}</span>
                         <Badge variant={p.enabled ? "success" : "secondary"}>

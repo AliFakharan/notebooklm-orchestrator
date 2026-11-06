@@ -1,22 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { AudioLines, FileAudio, Upload, X } from "lucide-react";
-import {
-  accountsList,
-  jobCreate,
-  proxiesList,
-  type Account,
-  type MaskedProxyNode,
-} from "@/lib/api";
+import { jobCreate } from "@/lib/api";
 import { faFileSize } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
-import { EmptyState } from "@/components/shared/empty-state";
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
 /** Client-side prompt cap mirroring the server limit (previously a runtime setting). */
@@ -24,8 +16,10 @@ const MAX_PROMPT_CHARS = 20_000;
 const ALLOWED_AUDIO_EXT = ["wav", "mp3", "m4a", "ogg", "flac"];
 
 /**
- * درخواست جدید — a multipart form (prompt + optional audio + preferred
- * account/node). Everything is validated client-side first, and the
+ * درخواست جدید — a multipart form (prompt + optional audio). The Google
+ * account and the egress proxy are chosen automatically by the server
+ * (default account, healthiest enabled proxy); there is no per-job
+ * selection. Everything is validated client-side first, and the
  * provider's own validation runs server-side on the job.
  */
 export function CreateJobPage() {
@@ -37,21 +31,8 @@ export function CreateJobPage() {
   const [prompt, setPrompt] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [nodes, setNodes] = useState<MaskedProxyNode[]>([]);
-  const [accountId, setAccountId] = useState("");
-  const [nodeId, setNodeId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-
-  useEffect(() => {
-    accountsList()
-      .then(setAccounts)
-      .catch(() => undefined);
-    proxiesList()
-      .then(setNodes)
-      .catch(() => undefined);
-  }, []);
 
   const pickFile = (f: File | null) => {
     setFile(null);
@@ -69,7 +50,7 @@ export function CreateJobPage() {
     setFile(f);
   };
 
-  const canSubmit = prompt.trim().length > 0 && accountId !== "" && !submitting;
+  const canSubmit = prompt.trim().length > 0 && !submitting;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,8 +62,6 @@ export function CreateJobPage() {
         title: title.trim() || undefined,
         prompt: prompt.trim(),
         audio: file,
-        preferredAccountId: accountId,
-        preferredNodeId: nodeId || null,
       });
       toast({
         title: "درخواست ایجاد شد",
@@ -180,45 +159,6 @@ export function CreateJobPage() {
               )}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                label="حساب گوگل"
-                htmlFor="account"
-                hint={
-                  accounts.length === 0
-                    ? "حسابی ثبت نشده است؛ ابتدا در صفحه‌ی حساب‌ها یک حساب بسازید."
-                    : "انتخاب الزامی است: نوت‌بوک با همین حساب ساخته می‌شود. حساب انتخابی باید جلسه‌ی تأییدشده داشته باشد."
-                }
-              >
-                <Select
-                  id="account"
-                  value={accountId}
-                  onChange={(e) => setAccountId(e.target.value)}
-                  placeholder="انتخاب حساب"
-                  options={accounts.map((a) => ({
-                    value: a.id,
-                    label: a.displayEmail || a.label,
-                  }))}
-                />
-              </Field>
-              <Field
-                label="پراکسی ترجیحی"
-                htmlFor="node"
-                hint={nodes.length === 0 ? "پراکسی‌ای تعریف نشده است." : undefined}
-              >
-                <Select
-                  id="node"
-                  value={nodeId}
-                  onChange={(e) => setNodeId(e.target.value)}
-                  placeholder="خودکار"
-                  options={[
-                    { value: "", label: "خودکار (به انتخاب سیستم)" },
-                    ...nodes.map((n) => ({ value: n.id, label: n.config.name })),
-                  ]}
-                />
-              </Field>
-            </div>
-
             {submitError && (
               <p
                 role="alert"
@@ -245,20 +185,6 @@ export function CreateJobPage() {
           </form>
         </CardContent>
       </Card>
-
-      {accounts.length === 0 && (
-        <EmptyState
-          title="برای شروع، یک حساب ثبت کنید"
-          description="بدون حساب فعال، درخواست در وضعیت «در انتظار حساب» می‌ماند."
-          action={
-            <Link to="/accounts">
-              <Button variant="outline" size="sm">
-                رفتن به حساب‌ها
-              </Button>
-            </Link>
-          }
-        />
-      )}
     </div>
   );
 }

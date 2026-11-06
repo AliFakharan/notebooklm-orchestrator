@@ -5,8 +5,7 @@ import { DashboardPage } from "@/features/dashboard/dashboard";
 import { CreateJobPage } from "@/features/jobs/create-job";
 import { JobHistoryPage } from "@/features/jobs/job-history";
 import { JobDetailsPage } from "@/features/jobs/job-details";
-import { AccountsPage } from "@/features/accounts/accounts";
-import { ProxiesPage } from "@/features/proxies/proxies";
+import { AdminPage } from "@/features/admin/admin";
 
 /**
  * Application root: local single-user app (no login — the server is
@@ -23,8 +22,10 @@ export function App() {
             <Route path="/new" element={<CreateJobPage />} />
             <Route path="/jobs" element={<JobHistoryPage />} />
             <Route path="/jobs/:id" element={<JobDetailsPage />} />
-            <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/proxies" element={<ProxiesPage />} />
+            <Route path="/admin" element={<AdminPage />} />
+            {/* Legacy direct links now land on the gated admin section. */}
+            <Route path="/accounts" element={<Navigate to="/admin" replace />} />
+            <Route path="/proxies" element={<Navigate to="/admin" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

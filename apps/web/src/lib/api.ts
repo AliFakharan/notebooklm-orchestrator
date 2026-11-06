@@ -183,16 +183,14 @@ export function jobCreate(input: {
   prompt: string;
   title?: string;
   audio: File | null;
-  /** Required: the user always picks which Google account creates the notebook. */
-  preferredAccountId: string;
-  preferredNodeId?: string | null;
 }): Promise<CreateJobResult> {
+  // The account and proxy are chosen automatically on the server (the
+  // default account, then the healthiest enabled proxy) — there is no
+  // per-job selection any more.
   const fd = new FormData();
   fd.append("prompt", input.prompt);
   if (input.title) fd.append("title", input.title);
   if (input.audio) fd.append("audio", input.audio);
-  if (input.preferredAccountId) fd.append("preferredAccountId", input.preferredAccountId);
-  if (input.preferredNodeId) fd.append("preferredNodeId", input.preferredNodeId);
   return request("/api/jobs", { method: "POST", body: fd });
 }
 
@@ -304,6 +302,32 @@ export function accountHealthCheck(id: string): Promise<AccountHealth> {
 
 export function accountSetDefault(id: string, isDefault: boolean): Promise<Account> {
   return request(`/api/accounts/${id}/default`, jsonInit("POST", { isDefault }));
+}
+
+/* --------------------------------- admin --------------------------------- */
+
+export interface AdminStatus {
+  enabled: boolean;
+  authenticated: boolean;
+}
+
+/**
+ * Log in to the infrastructure admin gate (accounts/proxies). The server sets
+ * an HttpOnly cookie; credentials are sent in the JSON body (never logged).
+ */
+export function adminLogin(
+  username: string,
+  password: string,
+): Promise<{ ok: boolean; gated: boolean }> {
+  return request("/api/admin/login", jsonInit("POST", { username, password }));
+}
+
+export function adminLogout(): Promise<{ ok: boolean }> {
+  return request("/api/admin/logout", jsonInit("POST", {}));
+}
+
+export function adminMe(): Promise<AdminStatus> {
+  return request("/api/admin/me");
 }
 
 /* --------------------------------- proxies --------------------------------- */

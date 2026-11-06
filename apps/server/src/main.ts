@@ -58,9 +58,17 @@ async function main(): Promise<void> {
       `liveTests=${config.liveTestsEnabled}`,
   );
   if ((config.host === "0.0.0.0" || config.host === "::") && !inContainer()) {
-    console.warn(
-      `[nlo] WARNING: bound to all interfaces without any auth — do NOT expose this to a network.`,
-    );
+    if (config.admin.enabled) {
+      console.warn(
+        `[nlo] WARNING: bound to all interfaces — the infrastructure API is protected by the ` +
+          `admin gate (NLO_ADMIN_USER/NLO_ADMIN_PASSWORD); the jobs API remains open.`,
+      );
+    } else {
+      console.warn(
+        `[nlo] WARNING: bound to all interfaces without any auth — do NOT expose this to a network. ` +
+          `Set NLO_ADMIN_USER/NLO_ADMIN_PASSWORD to at least gate the infrastructure API.`,
+      );
+    }
   }
   if (config.provider === "mock") {
     console.log("[nlo] NOTE: mock provider is active — all job results are simulated.");

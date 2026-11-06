@@ -17,8 +17,10 @@ const listQuery = z.object({
 });
 
 export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
-  // Create a job: multipart with fields prompt, preferredAccountId,
-  // preferredNodeId and an optional file part "audio".
+  // Create a job: multipart with field prompt and an optional file part
+  // "audio". The Google account is chosen automatically (the default
+  // account, else the most recently successful eligible one) — there is no
+  // per-job account/proxy selection.
   app.post("/api/jobs", async (req, reply) => {
     const fields: Record<string, string> = {};
     // The multipart iterator only advances past a file part once its stream is
@@ -55,25 +57,19 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
       throw new ApiError(ApiCodes.validation, "prompt is required", 400);
     }
 
-    // A job MUST name its Google account explicitly — there is no "automatic"
-    // account selection (the user decides which identity creates the notebook).
-    const preferredAccountId = (fields.preferredAccountId ?? "").trim() || null;
-    const preferredNodeId = fields.preferredNodeId || null;
+    // Account + proxy are chosen automatically at run time: the runner
+    // prefers the default account (then the most recently successful eligible
+    // one) and picks the healthiest enabled proxy. Reject only when there is
+    // NO account at all (clearer than a runner failure later); the runner
+    // re-checks eligibility + a live verified session.
     const title = (fields.title ?? "").trim() || null;
-
-    if (!preferredAccountId) {
+    if (ctx.accounts.list().length === 0) {
       if (tempAudioPath) await rm(tempAudioPath);
       throw new ApiError(
         ApiCodes.validation,
-        "a google account must be selected (preferredAccountId)",
+        "no google account is registered; add one in the admin panel first",
         400,
       );
-    }
-    // Reject an unknown account ID up front (clearer than a runner failure
-    // later); the runner re-checks eligibility + a live verified session.
-    if (!ctx.accounts.get(preferredAccountId)) {
-      if (tempAudioPath) await rm(tempAudioPath);
-      throw new ApiError(ApiCodes.notFound, "preferred account not found", 404);
     }
 
     // Validate + hash the audio if present.
@@ -118,8 +114,8 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
         prompt,
         title,
         audio: audioMeta,
-        preferredAccountId,
-        preferredNodeId,
+        preferredAccountId: null,
+        preferredNodeId: null,
       },
       configSnapshot: {
         provider: ctx.provider.name,

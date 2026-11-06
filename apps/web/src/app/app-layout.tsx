@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import { AudioLines, Boxes, Cable, Gauge, PlusCircle, Radio } from "lucide-react";
+import { AudioLines, Gauge, LockKeyhole, PlusCircle, Radio } from "lucide-react";
 import { Sidebar, SidebarGroup, SidebarItem } from "@/components/ui/sidebar";
 
 const NAV = [
@@ -8,10 +8,11 @@ const NAV = [
   { to: "/jobs", label: "تاریخچه‌ی درخواست‌ها", icon: Radio, end: false },
 ];
 
-const INFRA = [
-  { to: "/accounts", label: "حساب‌ها", icon: Boxes, end: false },
-  { to: "/proxies", label: "پراکسی‌ها", icon: Cable, end: false },
-];
+/**
+ * Infrastructure (accounts + proxies) is admin-gated: a single link to
+ * /admin, where the user logs in before seeing either section.
+ */
+const INFRA = [{ to: "/admin", label: "زیرساخت", icon: LockKeyhole, end: false }];
 
 function NavLinkItem({
   to,
@@ -86,7 +87,6 @@ function navTitle(path: string): string {
   if (path === "/new") return "درخواست پردازش جدید";
   if (path.startsWith("/jobs/")) return "جزئیات درخواست";
   if (path === "/jobs") return "تاریخچه‌ی درخواست‌ها";
-  if (path === "/accounts") return "حساب‌ها";
-  if (path === "/proxies") return "پراکسی‌ها";
+  if (path === "/admin") return "زیرساخت (حساب‌ها و پراکسی‌ها)";
   return "پنل مدیریت";
 }

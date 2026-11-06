@@ -105,23 +105,20 @@ describe("jobCreate multipart", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { id: "j1", status: "CREATED" }));
     vi.stubGlobal("fetch", fetchMock);
     const file = new File(["audio-bytes"], "a.wav", { type: "audio/wav" });
-    await jobCreate({ prompt: "hello", audio: file, preferredAccountId: "acc1" });
+    await jobCreate({ prompt: "hello", audio: file });
     const [, init] = fetchMock.mock.calls[0]!;
     expect(init.method).toBe("POST");
     const body = init.body as FormData;
     expect(body.get("prompt")).toBe("hello");
-    expect(body.get("preferredAccountId")).toBe("acc1");
     expect((body.get("audio") as File).name).toBe("a.wav");
   });
 
-  it("omits audio and node preference", async () => {
+  it("omits audio when not provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { id: "j2", status: "CREATED" }));
     vi.stubGlobal("fetch", fetchMock);
-    await jobCreate({ prompt: "q", audio: null, preferredAccountId: "acc1" });
+    await jobCreate({ prompt: "q", audio: null });
     const body = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
     expect(body.get("prompt")).toBe("q");
     expect(body.get("audio")).toBeNull();
-    expect(body.get("preferredAccountId")).toBe("acc1");
-    expect(body.get("preferredNodeId")).toBeNull();
   });
 });

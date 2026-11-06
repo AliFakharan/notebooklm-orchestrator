@@ -5,6 +5,7 @@ import multipart from "@fastify/multipart";
 import { toApiErrorBody, ApiError, ApiCodes, redactDeep } from "@nlo/shared";
 import { ZodError } from "zod";
 import type { AppContext } from "../app-context.js";
+import { guardAdminRoutes, registerAdminRoutes } from "./admin-auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerJobRoutes } from "./routes/jobs.js";
 import { registerAccountRoutes } from "./routes/accounts.js";
@@ -119,11 +120,16 @@ export async function buildApp(
   });
 
   registerHealthRoutes(app, ctx);
+  registerAdminRoutes(app, ctx);
   registerJobRoutes(app, ctx);
   registerAccountRoutes(app, ctx);
   registerProxyRoutes(app, ctx);
   registerProviderRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
+  // Infrastructure API (accounts/proxies/sessions) requires the admin cookie
+  // when credentials are configured. The guard is added last so the admin
+  // login routes above are reachable without a cookie.
+  guardAdminRoutes(app, ctx);
 
   return app;
 }

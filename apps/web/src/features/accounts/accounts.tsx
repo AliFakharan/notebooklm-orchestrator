@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { Boxes, KeyRound, LogOut, Pencil, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import {
+  Boxes,
+  KeyRound,
+  LogOut,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Star,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import {
   accountCreate,
   accountDelete,
+  accountSetDefault,
   accountUpdate,
   accountsList,
   providerInfo,
@@ -122,6 +133,21 @@ export function AccountsPage() {
     }
   };
 
+  const doSetDefault = async (a: Account) => {
+    setBusyId(a.id);
+    try {
+      await accountSetDefault(a.id, !a.isDefault);
+      setItems((l) =>
+        l ? l.map((x) => ({ ...x, isDefault: x.id === a.id ? !x.isDefault : false })) : l,
+      );
+      void load();
+    } catch (err) {
+      toast({ title: "تغییر پیش‌فرض ناموفق بود", description: errMessage(err), variant: "error" });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const doDelete = async () => {
     if (!deleting) return;
     try {
@@ -182,6 +208,7 @@ export function AccountsPage() {
                 <TableHead>حساب</TableHead>
                 <TableHead>وضعیت</TableHead>
                 {provider && !provider.isMock && <TableHead>جلسه (ورود واقعی)</TableHead>}
+                <TableHead aria-label="حساب پیش‌فرض">پیش‌فرض</TableHead>
                 <TableHead aria-label="عملیات" />
               </TableRow>
             </TableHeader>
@@ -213,6 +240,22 @@ export function AccountsPage() {
                       />
                     </TableCell>
                   )}
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label={a.isDefault ? "حذف حالت پیش‌فرض" : "انتخاب به‌عنوان پیش‌فرض"}
+                      aria-pressed={a.isDefault}
+                      title="حساب پیش‌فرض: درخواست‌های جدید به‌صورت خودکار با همین حساب اجرا می‌شوند."
+                      disabled={busyId === a.id}
+                      className={
+                        a.isDefault ? "text-brand" : "text-muted-foreground hover:text-foreground"
+                      }
+                      onClick={() => void doSetDefault(a)}
+                    >
+                      <Star className={a.isDefault ? "fill-brand" : undefined} />
+                    </Button>
+                  </TableCell>
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       <Button
