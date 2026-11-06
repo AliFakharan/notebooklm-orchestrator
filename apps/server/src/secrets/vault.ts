@@ -106,14 +106,4 @@ export class SecretVault {
   has(ref: string): boolean {
     return this.db.raw.prepare("SELECT 1 AS x FROM secrets WHERE ref = ?").get(ref) !== undefined;
   }
-
-  /**
-   * List refs with their kind — NEVER the values. Used by the admin UI to
-   * show which secrets exist without exposing them.
-   */
-  list(): { ref: string; kind: string; updatedAt: string }[] {
-    return this.db.raw
-      .prepare("SELECT ref, kind, updated_at AS updatedAt FROM secrets ORDER BY ref")
-      .all() as { ref: string; kind: string; updatedAt: string }[];
-  }
 }

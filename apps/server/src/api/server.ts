@@ -11,7 +11,6 @@ import { registerAccountRoutes } from "./routes/accounts.js";
 import { registerProxyRoutes } from "./routes/proxies.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
-import { registerSettingsRoutes } from "./routes/settings.js";
 
 /**
  * Build the Fastify app. Binds to config.host (default 127.0.0.1).
@@ -125,7 +124,6 @@ export async function buildApp(
   registerProxyRoutes(app, ctx);
   registerProviderRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
-  registerSettingsRoutes(app, ctx);
 
   return app;
 }

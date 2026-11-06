@@ -1,15 +1,5 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import {
-  AudioLines,
-  Boxes,
-  Cable,
-  Gauge,
-  PlusCircle,
-  Radio,
-  Settings,
-  SlidersHorizontal,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { AudioLines, Boxes, Cable, Gauge, PlusCircle, Radio } from "lucide-react";
 import { Sidebar, SidebarGroup, SidebarItem } from "@/components/ui/sidebar";
 
 const NAV = [
@@ -74,25 +64,13 @@ export function AppLayout() {
             <NavLinkItem key={n.to} {...n} />
           ))}
         </SidebarGroup>
-        <SidebarGroup title="تنظیمات">
-          <NavLinkItem to="/settings" label="تنظیمات" icon={Settings} end={false} />
-        </SidebarGroup>
       </Sidebar>
 
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         <header className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <h1 className="truncate text-sm font-semibold" aria-live="polite">
-              {navTitle(location.pathname)}
-            </h1>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <NavLink to="/settings">
-              <Button variant="ghost" size="icon" aria-label="تنظیمات">
-                <SlidersHorizontal />
-              </Button>
-            </NavLink>
-          </div>
+          <h1 className="min-w-0 truncate text-sm font-semibold" aria-live="polite">
+            {navTitle(location.pathname)}
+          </h1>
         </header>
 
         <main className="min-w-0 flex-1">
@@ -110,6 +88,5 @@ function navTitle(path: string): string {
   if (path === "/jobs") return "تاریخچه‌ی درخواست‌ها";
   if (path === "/accounts") return "حساب‌ها";
   if (path === "/proxies") return "پراکسی‌ها";
-  if (path === "/settings") return "تنظیمات";
   return "پنل مدیریت";
 }

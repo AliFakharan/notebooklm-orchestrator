@@ -7,7 +7,7 @@ import type { AppContext } from "../src/app-context.js";
 /**
  * API integration tests against the real Fastify app (loopback, ephemeral
  * port via inject()). Covers the error envelope, jobs, proxies
- * (secret masking), accounts, provider info, and settings.
+ * (secret masking), accounts, and provider info.
  *
  * Note: the app's background queue is stopped in the test context so HTTP
  * tests never race with job execution (covered by runner/queue tests).
@@ -628,43 +628,6 @@ describe("provider info", () => {
     const levels = new Set(body.capabilities.map((c: { level: string }) => c.level));
     // Mock must not claim live capability.
     expect(levels.has("implemented_untested_live")).toBe(false);
-  });
-});
-
-describe("settings & secrets", () => {
-  it("reads and updates whitelisted settings; lists secrets without values", async () => {
-    const get = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
-    expect(get.statusCode).toBe(200);
-    expect(get.json().settings.jobsMaxAttemptsDefault).toBe(3);
-
-    const put = await app.inject({
-      method: "PUT",
-      url: "/api/settings",
-      headers: auth,
-      payload: { jobsMaxAttemptsDefault: 5 },
-    });
-    expect(put.statusCode).toBe(200);
-    expect(put.json().updated).toContain("jobsMaxAttemptsDefault");
-
-    const get2 = await app.inject({ method: "GET", url: "/api/settings", headers: auth });
-    expect(get2.json().settings.jobsMaxAttemptsDefault).toBe(5);
-
-    // A secret is visible as a masked ref + kind only.
-    const node = await app.inject({
-      method: "POST",
-      url: "/api/proxies",
-      headers: auth,
-      payload: { uri: `vless://33333333-3333-3333-3333-333333333333@203.0.113.11:443#s1` },
-    });
-    expect(node.statusCode).toBe(201);
-    const secrets = await app.inject({ method: "GET", url: "/api/secrets", headers: auth });
-    const found = secrets
-      .json()
-      .secrets.find((s: { ref: string }) => s.ref.startsWith("vless-uuid:3333"));
-    expect(found).toBeDefined();
-    expect(found.kind).toBe("vless-uuid");
-    // The full credential (the UUID after the colon) must not be exposed.
-    expect(JSON.stringify(secrets.json())).not.toContain("33333333-3333-3333-3333-333333333333");
   });
 });
 

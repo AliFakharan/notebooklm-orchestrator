@@ -32,7 +32,7 @@
 
 ### فاز 3 — Admin UI
 
-- dashboard، history، job detail، accounts، proxies، providers، settings
+- dashboard، history، job detail، accounts، proxies، providers
 
 ### فاز 4 — Provider adapter
 

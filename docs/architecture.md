@@ -80,7 +80,6 @@
 - `job_events` (timeline، jsonl در آرشیو هم mirror می‌شود)، `job_attempts`
 - `artifacts` — id، job، filename ایمن، media_type، size، source (`provider|application`)، storage_key
 - `secrets` — vault records
-- `settings` — key/value
 - `schema_migrations`
 
 ## ۶. آرشیو درخواست

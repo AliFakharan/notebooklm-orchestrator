@@ -606,34 +606,6 @@ export const SESSION_STATE_LABELS: Record<AuthSessionState, string> = {
   UNKNOWN: "نامشخص",
 };
 
-/* --------------------------------- settings --------------------------------- */
-
-export interface RuntimeSettings {
-  settings: { jobsMaxAttemptsDefault: number; jobsMaxPromptChars: number };
-  defaults: Record<string, number>;
-  writableKeys: string[];
-}
-
-export function settingsGet(): Promise<RuntimeSettings> {
-  return request("/api/settings");
-}
-
-export function settingsPut(
-  patch: Partial<{ jobsMaxAttemptsDefault: number; jobsMaxPromptChars: number }>,
-): Promise<{ ok: boolean; updated: string[] }> {
-  return request("/api/settings", jsonInit("PUT", patch));
-}
-
-export interface SecretEntry {
-  ref: string;
-  kind: string;
-  updatedAt: string;
-}
-
-export function secretsList(): Promise<{ secrets: SecretEntry[] }> {
-  return request("/api/secrets");
-}
-
 /* ---------------------------------- health ---------------------------------- */
 
 export interface ReadyInfo {

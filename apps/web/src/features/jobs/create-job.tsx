@@ -5,7 +5,6 @@ import {
   accountsList,
   jobCreate,
   proxiesList,
-  settingsGet,
   type Account,
   type MaskedProxyNode,
 } from "@/lib/api";
@@ -20,6 +19,8 @@ import { useToast } from "@/components/ui/toast";
 import { EmptyState } from "@/components/shared/empty-state";
 
 const MAX_UPLOAD = 200 * 1024 * 1024;
+/** Client-side prompt cap mirroring the server limit (previously a runtime setting). */
+const MAX_PROMPT_CHARS = 20_000;
 const ALLOWED_AUDIO_EXT = ["wav", "mp3", "m4a", "ogg", "flac"];
 
 /**
@@ -34,7 +35,6 @@ export function CreateJobPage() {
 
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [maxPromptChars, setMaxPromptChars] = useState(20_000);
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -45,9 +45,6 @@ export function CreateJobPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
-    settingsGet()
-      .then((s) => setMaxPromptChars(s.settings.jobsMaxPromptChars))
-      .catch(() => undefined);
     accountsList()
       .then(setAccounts)
       .catch(() => undefined);
@@ -124,7 +121,7 @@ export function CreateJobPage() {
               <Textarea
                 id="prompt"
                 rows={5}
-                maxLength={maxPromptChars}
+                maxLength={MAX_PROMPT_CHARS}
                 showCount
                 placeholder="مثلاً: خلاصه‌ی این گفت‌وگو را در پنج نکته بنویس…"
                 value={prompt}
