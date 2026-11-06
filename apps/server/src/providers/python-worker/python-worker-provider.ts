@@ -42,6 +42,18 @@ interface AuthTunnelSelection {
 export class PythonWorkerProvider implements NotebookLMProvider {
   readonly name = "python-worker";
 
+  /**
+   * Cached config-validation result. Validating spawns a real worker process
+   * (cold python start + `import notebooklm-py`, ~5s) — and the environment
+   * (python bin, worker path, installed packages) is static for the server's
+   * lifetime. So we validate ONCE, in the background at construction, and
+   * reuse it. Failures get a short retry TTL so a half-broken environment
+   * self-heals; successes are cached until the process exits.
+   */
+  private validationCache: { ok: boolean; issues: string[]; at: number } | null = null;
+  private validationInFlight: Promise<{ ok: boolean; issues: string[] }> | null = null;
+  private static readonly FAILURE_RETRY_MS = 15_000;
+
   constructor(
     private readonly opts: {
       sessionDir: string;
@@ -71,6 +83,10 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     },
   ) {
     mkdirSync(this.opts.sessionDir, { recursive: true, mode: 0o700 });
+    // Warm the validation cache in the background so the first (and every
+    // later) /api/provider call is instant instead of paying the ~5s worker
+    // cold-start on the request path.
+    void this.validateConfiguration().catch(() => {});
   }
 
   get log() {
@@ -202,7 +218,27 @@ export class PythonWorkerProvider implements NotebookLMProvider {
   }
 
   async validateConfiguration(): Promise<{ ok: boolean; issues: string[] }> {
-    const issues: string[] = [];
+    const c = this.validationCache;
+    if (c) {
+      const fresh = c.ok || Date.now() - c.at < PythonWorkerProvider.FAILURE_RETRY_MS;
+      if (fresh) return { ok: c.ok, issues: c.issues };
+    }
+    if (!this.validationInFlight) {
+      this.validationInFlight = this.runValidation().then((res) => {
+        this.validationCache = { ok: res.ok, issues: res.issues, at: Date.now() };
+        this.validationInFlight = null;
+        return res;
+      });
+    }
+    return this.validationInFlight;
+  }
+
+  /**
+   * Actual one-shot validation: spawn a throwaway worker, confirm notebooklm-py
+   * is importable, then close it. Never throws (failures are returned as
+   * `{ ok:false, issues }`).
+   */
+  private async runValidation(): Promise<{ ok: boolean; issues: string[] }> {
     try {
       const w = new WorkerSupervisor({
         pythonBin: this.opts.pythonBin,
@@ -210,15 +246,21 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         startupTimeoutMs: 30_000,
         log: this.log,
       });
-      const info = await w.start();
-      if (!info.version) issues.push("notebooklm-py package not importable in worker python");
-      // NOTE: playwright is NOT required — accounts authenticate via pasted
-      // cookies, and no app code launches a browser.
-      await w.close();
-      return { ok: issues.length === 0, issues };
+      try {
+        const info = await w.start();
+        const issues: string[] = [];
+        if (!info.version) issues.push("notebooklm-py package not importable in worker python");
+        // NOTE: playwright is NOT required — accounts authenticate via pasted
+        // cookies, and no app code launches a browser.
+        return { ok: issues.length === 0, issues };
+      } finally {
+        await w.close().catch(() => {});
+      }
     } catch (e) {
-      issues.push(`worker start failed: ${e instanceof Error ? e.message : String(e)}`);
-      return { ok: false, issues };
+      return {
+        ok: false,
+        issues: [`worker start failed: ${e instanceof Error ? e.message : String(e)}`],
+      };
     }
   }
 
