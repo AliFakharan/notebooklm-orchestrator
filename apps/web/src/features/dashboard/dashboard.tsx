@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Cable, PlusCircle, Radio } from "lucide-react";
+import { PlusCircle, Radio } from "lucide-react";
 import type { JobStatus } from "@nlo/shared";
-import { accountsList, jobsList, proxiesList, type Account, type MaskedProxyNode } from "@/lib/api";
+import { jobsList } from "@/lib/api";
 import { fa, faFileSize } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Stat } from "@/components/ui/stat";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -38,20 +37,12 @@ interface DashboardData {
   items: Awaited<ReturnType<typeof jobsList>>["items"];
   inFlight: number;
   attention: number;
-  /** null when the infrastructure API is gated (not admin-logged-in). */
-  infra: {
-    accountsTotal: number;
-    accountsReady: number;
-    proxiesTotal: number;
-    proxies: MaskedProxyNode[];
-  } | null;
-  /** true when the infra endpoints returned 401 (admin gate). */
-  infraLocked: boolean;
 }
 
 /**
- * نمای کلی — the operator's at-a-glance page: job counts by state, the most
- * recent requests, and the readiness of accounts and proxy nodes.
+ * نمای کلی — the operator's at-a-glance page: job counts by state and the
+ * most recent requests. Infrastructure (accounts/proxies) is admin-only and
+ * intentionally never shown here — it lives behind /admin.
  */
 export function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -62,33 +53,18 @@ export function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const [all, inflight, attention, accountsRes, proxiesRes] = await Promise.allSettled([
+      const [all, inflight, attention] = await Promise.allSettled([
         jobsList({ limit: 8 }),
         jobsList({ status: INFLIGHT, limit: 200 }),
         jobsList({ status: ["NEEDS_ATTENTION"], limit: 200 }),
-        accountsList(),
-        proxiesList(),
       ]);
       const first = (r: PromiseSettledResult<unknown>): unknown =>
         r.status === "fulfilled" ? r.value : null;
-      const accounts = first(accountsRes) as Account[] | null;
-      const proxies = first(proxiesRes) as MaskedProxyNode[] | null;
-      const infraLocked = accountsRes.status === "rejected" || proxiesRes.status === "rejected";
       setData({
         total: (first(all) as { total: number } | null)?.total ?? 0,
         items: (first(all) as { items: DashboardData["items"] } | null)?.items ?? [],
         inFlight: (first(inflight) as { total: number } | null)?.total ?? 0,
         attention: (first(attention) as { total: number } | null)?.total ?? 0,
-        infra:
-          accounts && proxies
-            ? {
-                accountsTotal: accounts.length,
-                accountsReady: accounts.filter((a) => a.status === "ACTIVE" && a.enabled).length,
-                proxiesTotal: proxies.length,
-                proxies,
-              }
-            : null,
-        infraLocked,
       });
       if (all.status === "rejected") {
         setError(all.reason instanceof Error ? all.reason.message : "بارگذاری نشد.");
@@ -111,26 +87,20 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3">
         {loading || !data ? (
-          Array.from({ length: 4 }).map((_, i) => <StatSkeleton key={i} />)
+          Array.from({ length: 2 }).map((_, i) => <StatSkeleton key={i} />)
         ) : (
           <>
             <Stat label="درخواست‌های در حال پردازش" value={fa(data.inFlight)} />
             <Stat label="نیازمند بررسی" value={fa(data.attention)} />
-            <Stat
-              label="حساب‌های آماده"
-              value={data.infra ? fa(data.infra.accountsReady) : "—"}
-              unit={data.infra ? `از ${fa(data.infra.accountsTotal)}` : undefined}
-            />
-            <Stat label="پراکسی‌ها" value={data.infra ? fa(data.infra.proxiesTotal) : "—"} />
           </>
         )}
       </div>
 
       {error && <ErrorBanner message={error} onRetry={() => void load()} />}
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4">
         <Card className="xl:col-span-2">
           <CardHeader className="flex-row items-center justify-between">
             <div>
@@ -211,52 +181,6 @@ export function DashboardPage() {
                   ))}
                 </TableBody>
               </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>زیرساخت</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            {loading || !data ? (
-              <div className="flex flex-col gap-2">
-                <SkeletonRow shimmer />
-                <SkeletonRow shimmer />
-              </div>
-            ) : !data.infra ? (
-              <EmptyState
-                icon={<Cable className="size-6" />}
-                title="زیرساخت قفل است"
-                description="حساب‌ها و پراکسی‌ها در بخش خصوصی مدیریت هستند و با رمز عبور در دسترسند."
-              />
-            ) : (
-              <>
-                <p className="text-xs leading-6 text-muted-foreground">
-                  {data.infra.accountsTotal === 0
-                    ? "حسابی ثبت نشده است؛ برای پردازش حداقل یک حساب لازم است."
-                    : `${fa(data.infra.accountsReady)} از ${fa(data.infra.accountsTotal)} حساب آماده‌ی پردازش است.`}
-                </p>
-                {data.infra.proxies.length === 0 ? (
-                  <EmptyState
-                    icon={<Cable className="size-6" />}
-                    title="پراکسی‌ای تعریف نشده"
-                    description="نودهای VLESS را با URI وارد کنید تا از خروجی محافظت‌شده استفاده شود."
-                  />
-                ) : (
-                  <ul className="flex flex-col gap-2">
-                    {data.infra.proxies.slice(0, 4).map((p) => (
-                      <li key={p.id} className="flex items-center justify-between gap-2 text-sm">
-                        <span className="truncate">{p.config.name}</span>
-                        <Badge variant={p.enabled ? "success" : "secondary"}>
-                          {p.enabled ? "فعال" : "غیرفعال"}
-                        </Badge>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </>
             )}
           </CardContent>
         </Card>
