@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { LockKeyhole } from "lucide-react";
+import { Outlet } from "react-router-dom";
+import { Cable, LockKeyhole, Users } from "lucide-react";
 import { adminLogin, adminMe, type AdminStatus } from "@/lib/api";
+import { AppShell, type NavItem } from "@/app/app-layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
@@ -9,13 +11,32 @@ import { AccountsPage } from "@/features/accounts/accounts";
 import { ProxiesPage } from "@/features/proxies/proxies";
 
 /**
- * Standalone admin pages — rendered OUTSIDE the main app layout (no sidebar),
- * so the regular app (نمای کلی / درخواست جدید / تاریخچه) is not reachable from
- * here. There is no link to these pages anywhere in the main UI; the only way
- * in is typing the URL. Access is gated by the admin cookie: unauthenticated
- * visitors see the login form, authenticated ones see the page directly.
+ * زیرساخت — the admin-gated section. It reuses the exact same app shell
+ * (header + sidebar) as the public pages, but its sidebar shows the
+ * «زیرساخت» group (حساب‌ها / پراکسی‌ها) instead of «کار اصلی», and there is
+ * no link to it anywhere in the public UI — the only way in is the URL.
  */
-function AdminShell({ title, children }: { title: string; children: React.ReactNode }) {
+const ADMIN_NAV: NavItem[] = [
+  { to: "/admin/accounts", label: "حساب‌ها", icon: Users, end: true, group: "زیرساخت" },
+  { to: "/admin/proxies", label: "پراکسی‌ها", icon: Cable, end: true, group: "زیرساخت" },
+];
+
+function adminTitle(path: string): string {
+  if (path === "/admin/proxies") return "پراکسی‌ها";
+  if (path === "/admin/accounts") return "حساب‌ها";
+  return "ورود به بخش زیرساخت";
+}
+
+/** Layout route for the whole /admin section (same look as the public app). */
+export function AdminShell() {
+  return <AppShell nav={ADMIN_NAV} titleFor={adminTitle} />;
+}
+
+/**
+ * Gate: until the admin cookie is present the content area shows the login
+ * form; the sidebar (زیرساخت group) stays visible either way.
+ */
+export function AdminGate() {
   const [status, setStatus] = useState<AdminStatus | null>(null);
 
   const load = useCallback(async () => {
@@ -31,49 +52,22 @@ function AdminShell({ title, children }: { title: string; children: React.ReactN
   }, [load]);
 
   if (!status) {
-    return (
-      <div className="flex min-h-screen flex-col gap-4 p-4">
-        <Skeleton className="h-40 w-full" />
-      </div>
-    );
+    return <Skeleton className="h-40 w-full" />;
   }
 
   if (!status.authenticated) {
-    return (
-      <div className="flex min-h-screen items-center justify-center p-4">
-        <LoginGate onAuthenticated={() => setStatus({ enabled: true, authenticated: true })} />
-      </div>
-    );
+    return <LoginGate onAuthenticated={() => setStatus({ enabled: true, authenticated: true })} />;
   }
 
-  return (
-    <div className="flex min-h-screen flex-col gap-4 p-4">
-      <header className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
-        <h1 className="min-w-0 truncate text-sm font-semibold" aria-live="polite">
-          {title}
-        </h1>
-      </header>
-      <main className="min-w-0 flex-1">{children}</main>
-    </div>
-  );
+  return <Outlet />;
 }
 
-/** /admin/accounts — the accounts page behind the admin gate. */
 export function AdminAccountsPage() {
-  return (
-    <AdminShell title="حساب‌ها">
-      <AccountsPage />
-    </AdminShell>
-  );
+  return <AccountsPage />;
 }
 
-/** /admin/proxies — the proxies page behind the admin gate. */
 export function AdminProxiesPage() {
-  return (
-    <AdminShell title="پراکسی‌ها">
-      <ProxiesPage />
-    </AdminShell>
-  );
+  return <ProxiesPage />;
 }
 
 function LoginGate({ onAuthenticated }: { onAuthenticated: () => void }) {
@@ -101,7 +95,7 @@ function LoginGate({ onAuthenticated }: { onAuthenticated: () => void }) {
   };
 
   return (
-    <div className="w-full max-w-sm">
+    <div className="mx-auto max-w-sm">
       <Card>
         <CardHeader>
           <CardTitle>ورود به بخش زیرساخت</CardTitle>
