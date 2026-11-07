@@ -432,8 +432,8 @@ describe("jobs", () => {
     expect(res.statusCode).toBe(201);
     const job = res.json();
     const detail = await app.inject({ method: "GET", url: `/api/jobs/${job.id}`, headers: auth });
-    expect(detail.json().input.audio.originalName).toBe("talk.wav");
-    expect(detail.json().input.audio.size).toBe(12);
+    expect(detail.json().input.sources[0].originalName).toBe("talk.wav");
+    expect(detail.json().input.sources[0].size).toBe(12);
   });
 
   it("404s for unknown job ids with the standard envelope", async () => {
@@ -446,7 +446,7 @@ describe("jobs", () => {
     const job = ctx.jobs.create({
       input: {
         prompt: "x",
-        audio: { originalName: "", mediaType: "", size: 0, sha256: "", providerConfirmed: false },
+        sources: [],
         preferredAccountId: null,
         preferredNodeId: null,
       },
@@ -474,7 +474,7 @@ describe("jobs", () => {
     const job = ctx.jobs.create({
       input: {
         prompt: "x",
-        audio: { originalName: "", mediaType: "", size: 0, sha256: "", providerConfirmed: false },
+        sources: [],
         preferredAccountId: null,
         preferredNodeId: null,
       },

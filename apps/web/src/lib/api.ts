@@ -67,36 +67,39 @@ async function errorFrom(res: Response): Promise<ApiClientError | null> {
  * The auth header goes on the fetch; the Blob URL then needs no credentials
  * for <audio> or a download anchor.
  */
-export async function jobAudioBlobUrl(jobId: string): Promise<{ url: string; type: string }> {
+export async function jobSourceBlobUrl(
+  jobId: string,
+  index: number,
+): Promise<{ url: string; type: string }> {
   let res: Response;
   try {
-    res = await fetch(`/api/jobs/${jobId}/audio`);
+    res = await fetch(`/api/jobs/${jobId}/sources/${index}`);
   } catch {
     throw new NetworkError();
   }
   if (!res.ok) {
     const err = await errorFrom(res);
-    throw err ?? new ApiClientError(res.status, "unknown", "دریافت صدا ناموفق بود.");
+    throw err ?? new ApiClientError(res.status, "unknown", "دریافت فایل ناموفق بود.");
   }
   const blob = await res.blob();
   return { url: URL.createObjectURL(blob), type: res.headers.get("content-type") ?? blob.type };
 }
 
-/** Download a job's input audio (triggers a browser save dialog). */
-export async function downloadJobAudio(jobId: string): Promise<void> {
+/** Download one of a job's input sources (triggers a browser save dialog). */
+export async function downloadJobSource(jobId: string, index: number): Promise<void> {
   let res: Response;
   try {
-    res = await fetch(`/api/jobs/${jobId}/audio/download`);
+    res = await fetch(`/api/jobs/${jobId}/sources/${index}?download=1`);
   } catch {
     throw new NetworkError();
   }
   if (!res.ok) {
     const err = await errorFrom(res);
-    throw err ?? new ApiClientError(res.status, "unknown", "دانلود صدا ناموفق بود.");
+    throw err ?? new ApiClientError(res.status, "unknown", "دانلود فایل ناموفق بود.");
   }
   const cd = res.headers.get("content-disposition") ?? "";
   const m = cd.match(/filename="([^"]*)"/);
-  const filename = m && m[1] ? decodeURIComponent(m[1]) : `audio-${jobId.slice(0, 8)}`;
+  const filename = m && m[1] ? decodeURIComponent(m[1]) : `source-${jobId.slice(0, 8)}`;
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -182,7 +185,7 @@ export interface CreateJobResult {
 export function jobCreate(input: {
   prompt: string;
   title?: string;
-  audio: File | null;
+  files: File[];
 }): Promise<CreateJobResult> {
   // The account and proxy are chosen automatically on the server (the
   // default account, then the healthiest enabled proxy) — there is no
@@ -190,7 +193,7 @@ export function jobCreate(input: {
   const fd = new FormData();
   fd.append("prompt", input.prompt);
   if (input.title) fd.append("title", input.title);
-  if (input.audio) fd.append("audio", input.audio);
+  for (const f of input.files) fd.append("sources", f, f.name);
   return request("/api/jobs", { method: "POST", body: fd });
 }
 

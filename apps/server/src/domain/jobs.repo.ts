@@ -5,10 +5,45 @@ import type {
   Job,
   JobEvent,
   JobInput,
+  JobSource,
   JobStatus,
   ResultProvenance,
 } from "@nlo/shared";
 import { canTransition, transition } from "@nlo/shared";
+
+/**
+ * Normalize a parsed `input_json` to the current shape. Jobs created before
+ * the multi-source model stored a single `audio` object; convert it to a
+ * one-entry `sources` list so old rows render correctly. (Their files live at
+ * the legacy `input/audio-<name>` path, so the download endpoint will 404 for
+ * them — the metadata (name/size/type) still displays.)
+ */
+function normalizeJobInput(input: JobInput): JobInput {
+  if (Array.isArray(input.sources)) return input;
+  const legacy = (input as { audio?: unknown }).audio as
+    { originalName?: unknown; mediaType?: unknown; size?: unknown } | undefined;
+  const sources: JobSource[] =
+    legacy &&
+    typeof legacy.originalName === "string" &&
+    legacy.originalName.length > 0 &&
+    typeof legacy.size === "number" &&
+    legacy.size > 0
+      ? [
+          {
+            originalName: legacy.originalName,
+            storageName: `audio-${legacy.originalName}`,
+            mediaType:
+              typeof legacy.mediaType === "string" && legacy.mediaType
+                ? legacy.mediaType
+                : "application/octet-stream",
+            size: legacy.size,
+            sha256: "",
+            providerConfirmed: false,
+          },
+        ]
+      : [];
+  return { ...input, sources };
+}
 
 /**
  * Jobs repository. Enforces the shared state machine on every status write:
@@ -304,7 +339,7 @@ export class JobsRepo {
   }
 
   private map(row: Record<string, unknown>): Job {
-    const input = JSON.parse(row.input_json as string) as JobInput;
+    const input = normalizeJobInput(JSON.parse(row.input_json as string) as JobInput);
     const status = row.status as JobStatus;
     return {
       id: row.id as string,

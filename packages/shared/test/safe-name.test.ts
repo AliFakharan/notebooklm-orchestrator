@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveWithin, safeName } from "../src/safe-name.js";
+import { safeName } from "../src/safe-name.js";
+import { resolveWithin } from "../src/resolve-within.js";
 
 describe("safeName", () => {
   it("keeps a simple name", () => {

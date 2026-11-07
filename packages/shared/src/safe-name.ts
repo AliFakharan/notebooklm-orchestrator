@@ -1,9 +1,8 @@
 /**
  * File name safety: user-supplied names NEVER become filesystem paths.
  * We sanitize for display/storage and keep the original in the manifest.
+ * Pure (no node builtins) — safe to run server- or client-side.
  */
-import { resolve as nodeResolve, sep as nodeSep } from "node:path";
-
 const ALLOWED_RE = /[^A-Za-z0-9._-]/g;
 
 /**
@@ -33,18 +32,4 @@ export function safeName(original: string, maxLen = 80): string {
     throw new Error("file name is a traversal token");
   }
   return cleaned;
-}
-
-/**
- * Resolve a path under `root` and verify the result stays inside `root`.
- * Throws if any segment would escape the root (path traversal defense).
- * Node-only (uses node:path) — server side.
- */
-export function resolveWithin(root: string, ...segments: string[]): string {
-  const cleanRoot = nodeResolve(root).replace(/[\\/]+$/, "");
-  const target = nodeResolve(cleanRoot, ...segments);
-  if (target !== cleanRoot && !target.startsWith(cleanRoot + nodeSep)) {
-    throw new Error(`path escapes root: ${segments.join("/")}`);
-  }
-  return target;
 }

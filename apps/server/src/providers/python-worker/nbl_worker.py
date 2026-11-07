@@ -12,11 +12,12 @@ Ops:
   ping            -> {"version", "notebooklmPy", "playwright": bool}
   validate        {sessionPath} -> {ok, exists, email?}
   verify          {sessionPath, timeoutSec} -> {email, notebooks, checkedAt}
-  job             {sessionPath, audioPath, audioName, prompt,
-                   notebookTitle, waitSec, timeoutSec}
-                  -> {email, notebookId, notebookTitle, sourceId,
-                      uploaded, conversationId, turnNumber, answer,
-                      references, checkedAt}
+  job             {sessionPath, sources: [{path, title, mediaType}],
+                   prompt, notebookTitle, waitSec, timeoutSec}
+                 -> {email, notebookId, notebookTitle,
+                     sources: [{title, sourceId, reused}],
+                     conversationId, turnNumber, answer,
+                     references, checkedAt}
 
 Security notes:
   * The worker is spawned per job with NO shell.
@@ -180,18 +181,27 @@ async def op_verify(p: dict[str, Any]) -> dict[str, Any]:
 
 async def op_job(p: dict[str, Any]) -> dict[str, Any]:
     session = Path(p["sessionPath"])
-    audio_path = Path(p["audioPath"])
-    audio_name = p.get("audioName") or audio_path.name
     prompt = str(p["prompt"])
     notebook_title = str(p["notebookTitle"])
     wait_sec = float(p.get("waitSec", 600))
     timeout_sec = float(p.get("timeoutSec", 1800))
+    # 0..N sources, each {path, title, mediaType}.
+    srcs = p.get("sources") or []
+    sources: list[dict[str, Any]] = []
+    for s in srcs:
+        sp = Path(str(s["path"]))
+        if not sp.is_file():
+            raise FileNotFoundError(f"source file not found: {sp}")
+        sources.append(
+            {
+                "path": sp,
+                "title": str(s.get("title") or sp.name),
+                "mediaType": s.get("mediaType") or None,
+            }
+        )
 
     async def _progress(stage: str, **data: Any) -> None:
         await emit({"event": "progress", "op": None, "data": {"stage": stage, **data}})
-
-    if not audio_path.is_file():
-        raise FileNotFoundError(f"audio file not found: {audio_path}")
 
     await _progress("opening_session")
     ctx, client = await _client_with(session, min(timeout_sec, 300))
@@ -216,41 +226,60 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
         def _src_id(s: Any) -> str | None:
             return getattr(s, "source_id", None) or getattr(s, "id", None)
 
-        # Idempotency anchor: reuse an existing source with the same title
-        # instead of double-uploading on a safe retry.
-        uploaded = True
-        source = None
+        # Idempotency anchor: on a safe retry, reuse an existing source whose
+        # title matches instead of double-uploading.
+        existing: list[Any] = []
         try:
-            sources = await client.sources.list(notebook_id)
-            source = next(
-                (s for s in sources if getattr(s, "title", None) == audio_name), None
-            )
+            existing = await client.sources.list(notebook_id)
         except Exception:
-            source = None
-        if source is not None:
-            uploaded = False
-            await _progress("source_reused", sourceId=_src_id(source))
-        else:
-            await _progress("uploading_audio")
-            source = await client.sources.add_file(
-                notebook_id,
-                audio_path,
-                title=audio_name,
-            )
-            await _progress("upload_done", sourceId=_src_id(source))
+            existing = []
 
-        source_id = _src_id(source)
-        if not source_id:
-            raise RuntimeError(
-                "audio upload reported success but returned no source id "
-                f"(source={type(source).__name__}); cannot wait for processing"
+        resolved: list[dict[str, Any]] = []
+        if sources:
+            await _progress("uploading_sources", count=len(sources))
+        for s in sources:
+            match = next(
+                (x for x in existing if getattr(x, "title", None) == s["title"]), None
             )
-        await _progress("waiting_for_processing")
-        await client.sources.wait_until_ready(notebook_id, source_id, timeout=wait_sec)
-        await _progress("processing_done")
+            if match is not None:
+                await _progress(
+                    "source_reused", title=s["title"], sourceId=_src_id(match)
+                )
+                resolved.append(
+                    {"title": s["title"], "sourceId": _src_id(match), "reused": True}
+                )
+                continue
+            uploaded = await client.sources.add_file(
+                notebook_id,
+                s["path"],
+                mime_type=s["mediaType"],
+                title=s["title"],
+            )
+            await _progress("upload_done", title=s["title"], sourceId=_src_id(uploaded))
+            resolved.append(
+                {"title": s["title"], "sourceId": _src_id(uploaded), "reused": False}
+            )
+
+        source_ids = [sid for sid in (r["sourceId"] for r in resolved) if sid]
+        for r in resolved:
+            if not r["sourceId"]:
+                raise RuntimeError(
+                    f"upload for {r['title']!r} reported success but returned no "
+                    "source id; cannot wait for processing"
+                )
+
+        # Wait for every source to finish processing (sequential: one at a
+        # time keeps the per-source wait bounded and progress meaningful).
+        if source_ids:
+            await _progress("waiting_for_processing")
+        for i, sid in enumerate(source_ids):
+            await client.sources.wait_until_ready(notebook_id, sid, timeout=wait_sec)
+            await _progress("processing_done", index=i + 1, of=len(source_ids))
 
         await _progress("executing_prompt")
-        result = await client.chat.ask(notebook_id, prompt, source_ids=[source_id])
+        result = await client.chat.ask(
+            notebook_id, prompt, source_ids=source_ids or None
+        )
         await _progress("prompt_done")
 
         refs = []
@@ -266,8 +295,7 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
             "email": email,
             "notebookId": notebook_id,
             "notebookTitle": notebook_title,
-            "sourceId": source_id,
-            "uploaded": uploaded,
+            "sources": resolved,
             "conversationId": getattr(result, "conversation_id", None),
             "turnNumber": getattr(result, "turn_number", None),
             "answer": getattr(result, "answer", "") or "",

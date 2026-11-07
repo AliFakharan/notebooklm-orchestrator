@@ -1,31 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Link, useParams } from "react-router-dom";
+import { Ban, Check, Copy, Download, FileText, RotateCcw } from "lucide-react";
+import type { Job } from "@nlo/shared";
 import {
-  Ban,
-  Check,
-  Copy,
-  Download,
-  FileAudio,
-  ListOrdered,
-  MessageSquareText,
-  RefreshCw,
-  RotateCcw,
-  ScrollText,
-} from "lucide-react";
-import type { Artifact, Job, JobEvent } from "@nlo/shared";
-import {
-  artifactDownload,
-  downloadJobAudio,
-  jobAttempts,
-  jobArtifacts,
-  jobAudioBlobUrl,
+  downloadJobSource,
+  jobSourceBlobUrl,
   jobCancel,
-  jobEvents,
   jobGet,
   jobRequeue,
   FAILURE_CLASS_LABELS,
-  type JobAttempt,
 } from "@/lib/api";
 import { fa, faFileSize } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/toast";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { JobStatusBadge } from "@/components/shared/status-badge";
@@ -42,9 +25,9 @@ import { RelativeTime } from "@/components/shared/relative-time";
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED"]);
 
 /**
- * جزئیات درخواست — full job record: identity, progress, actions (cancel /
- * re-queue), and tabs for the answer, event timeline, attempts and
- * artifacts. Non-terminal jobs poll until they settle.
+ * جزئیات درخواست — job identity, progress, the uploaded sources, actions
+ * (cancel / re-queue) and the answer. Non-terminal jobs poll until they
+ * settle.
  */
 export function JobDetailsPage() {
   const { id = "" } = useParams();
@@ -188,7 +171,7 @@ export function JobDetailsPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <Progress value={job.progress} label="پیشرفت" showValue size="sm" />
-          {job.input.audio.size > 0 && <InputAudio jobId={job.id} job={job} />}
+          {(job.input.sources ?? []).length > 0 && <JobSources job={job} />}
           {job.progressNote && <p className="text-xs text-muted-foreground">{job.progressNote}</p>}
           {job.status === "FAILED" && job.errorMessage && (
             <p
@@ -201,47 +184,9 @@ export function JobDetailsPage() {
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="answer">
-        <TabsList aria-label="بخش‌های درخواست">
-          <TabsTrigger value="answer">
-            <span className="inline-flex items-center gap-1.5">
-              <MessageSquareText className="size-4" />
-              پاسخ
-            </span>
-          </TabsTrigger>
-          <TabsTrigger value="events">
-            <span className="inline-flex items-center gap-1.5">
-              <ScrollText className="size-4" />
-              رویدادها
-            </span>
-          </TabsTrigger>
-          <TabsTrigger value="attempts">
-            <span className="inline-flex items-center gap-1.5">
-              <ListOrdered className="size-4" />
-              تلاش‌ها
-            </span>
-          </TabsTrigger>
-          <TabsTrigger value="artifacts">
-            <span className="inline-flex items-center gap-1.5">
-              <FileAudio className="size-4" />
-              فایل‌ها
-            </span>
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="answer" className="mt-4">
-          <AnswerPanel job={job} />
-        </TabsContent>
-        <TabsContent value="events" className="mt-4">
-          <EventsPanel jobId={job.id} />
-        </TabsContent>
-        <TabsContent value="attempts" className="mt-4">
-          <AttemptsPanel jobId={job.id} />
-        </TabsContent>
-        <TabsContent value="artifacts" className="mt-4">
-          <ArtifactsPanel job={job} />
-        </TabsContent>
-      </Tabs>
+      <div className="mt-2">
+        <AnswerPanel job={job} />
+      </div>
 
       <p className="text-xs text-muted-foreground">
         <Link to="/jobs" className="hover:underline">
@@ -255,21 +200,61 @@ export function JobDetailsPage() {
 /* ---------------------------- input audio player ---------------------------- */
 
 /**
- * Plexer + downloader for the audio the job was created with. The blob is
- * fetched once on mount (auth header included) and revoked on unmount.
+ * The sources the job was created with: a list of the uploaded files. Audio
+ * sources also get an inline player (the blob is fetched once and revoked on
+ * unmount).
  */
-function InputAudio({ jobId, job }: { jobId: string; job: Job }) {
+function JobSources({ job }: { job: Job }) {
+  const sources = job.input.sources ?? [];
+  const firstAudioIndex = sources.findIndex((s) => s.mediaType.startsWith("audio/"));
+
+  return (
+    <div className="flex flex-col gap-2 rounded-field border-line border-border bg-field p-3">
+      <span className="flex items-center gap-2 text-sm font-medium">
+        <FileText className="h-4 w-4 text-muted-foreground" />
+        فایل‌های ورودی ({fa(sources.length)})
+      </span>
+      <ul className="flex flex-col gap-1.5">
+        {sources.map((s, i) => (
+          <li key={s.storageName} className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-xs" dir="ltr">
+              {s.originalName}
+            </span>
+            <span className="shrink-0 text-xs text-muted-foreground">{faFileSize(s.size)}</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`دانلود ${s.originalName}`}
+              title={`دانلود ${s.originalName}`}
+              onClick={() => void downloadJobSource(job.id, i + 1).catch(() => {})}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+          </li>
+        ))}
+      </ul>
+      {firstAudioIndex >= 0 && (
+        <AudioSourcePlayer
+          jobId={job.id}
+          index={firstAudioIndex + 1}
+          name={sources[firstAudioIndex]?.originalName ?? "فایل صوتی"}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Inline player for one audio source (blob fetched once, revoked on unmount). */
+function AudioSourcePlayer({ jobId, index, name }: { jobId: string; index: number; name: string }) {
   const [src, setSrc] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const { audio } = job.input;
 
   useEffect(() => {
     let alive = true;
     let url: string | null = null;
     void (async () => {
       try {
-        const { url: u } = await jobAudioBlobUrl(jobId);
+        const { url: u } = await jobSourceBlobUrl(jobId, index);
         if (!alive) {
           URL.revokeObjectURL(u);
           return;
@@ -284,41 +269,18 @@ function InputAudio({ jobId, job }: { jobId: string; job: Job }) {
       alive = false;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [jobId]);
+  }, [jobId, index]);
 
-  const doDownload = async () => {
-    setBusy(true);
-    try {
-      await downloadJobAudio(jobId);
-    } catch {
-      /* a failed save dialog is not worth a toast here */
-    } finally {
-      setBusy(false);
-    }
-  };
-
+  if (failed) {
+    return <p className="text-xs text-muted-foreground">دریافت صدا برای پخش ممکن نشد.</p>;
+  }
+  if (!src) return null;
   return (
-    <div className="flex flex-col gap-2 rounded-field border-line border-border bg-field p-3">
-      <div className="flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2 text-sm font-medium">
-          <FileAudio className="h-4 w-4 text-muted-foreground" />
-          فایل صوتی ورودی
-        </span>
-        <span className="text-xs text-muted-foreground" dir="ltr">
-          {audio.originalName} · {faFileSize(audio.size)}
-        </span>
-      </div>
-      {src && <audio controls src={src} className="w-full" />}
-      {failed && <p className="text-xs text-muted-foreground">دریافت صدا برای پخش ممکن نشد.</p>}
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={busy || failed}
-        onClick={() => void doDownload()}
-      >
-        <Download className="h-3.5 w-3.5" />
-        {busy ? "در حال آماده‌سازی…" : "دانلود فایل صوتی"}
-      </Button>
+    <div className="flex flex-col gap-1">
+      <p className="truncate text-xs text-muted-foreground" dir="ltr">
+        پخش: {name}
+      </p>
+      <audio controls src={src} className="w-full" />
     </div>
   );
 }
@@ -389,251 +351,6 @@ function AnswerPanel({ job }: { job: Job }) {
             </pre>
           </details>
         )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function EventsPanel({ jobId }: { jobId: string }) {
-  const [events, setEvents] = useState<JobEvent[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      setEvents(await jobEvents(jobId));
-    } catch (err) {
-      setError(errMessage(err));
-    }
-  }, [jobId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  if (error) return <ErrorBanner message={error} onRetry={() => void load()} />;
-  if (!events)
-    return (
-      <div className="flex flex-col gap-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-10 w-full" />
-        ))}
-      </div>
-    );
-  if (events.length === 0)
-    return (
-      <Card>
-        <CardContent className="p-6 text-sm text-muted-foreground">
-          رویدادی ثبت نشده است.
-        </CardContent>
-      </Card>
-    );
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>خط زمان رویدادها</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ol className="flex flex-col">
-          {events.map((ev) => (
-            <li key={ev.id} className="flex gap-3 border-b border-border py-2.5 last:border-0">
-              <div className="w-40 shrink-0 text-xs text-muted-foreground">
-                <RelativeTime iso={ev.at} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-medium" dir="ltr">
-                  {ev.type}
-                </p>
-                {ev.message && <p className="text-xs text-muted-foreground">{ev.message}</p>}
-              </div>
-            </li>
-          ))}
-        </ol>
-      </CardContent>
-    </Card>
-  );
-}
-
-function AttemptsPanel({ jobId }: { jobId: string }) {
-  const [attempts, setAttempts] = useState<JobAttempt[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      setAttempts(await jobAttempts(jobId));
-    } catch (err) {
-      setError(errMessage(err));
-    }
-  }, [jobId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  if (error) return <ErrorBanner message={error} onRetry={() => void load()} />;
-  if (!attempts)
-    return (
-      <div className="flex flex-col gap-2">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Skeleton key={i} className="h-14 w-full" />
-        ))}
-      </div>
-    );
-  if (attempts.length === 0)
-    return (
-      <Card>
-        <CardContent className="p-6 text-sm text-muted-foreground">
-          هنوز تلاشی ثبت نشده است.
-        </CardContent>
-      </Card>
-    );
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>تلاش‌های پردازش</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ol className="flex flex-col gap-3">
-          {attempts.map((a) => (
-            <li key={a.attempt} className="rounded-field border-line border-border bg-field/40 p-3">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <Badge
-                  variant={
-                    a.outcome === "succeeded"
-                      ? "success"
-                      : a.outcome === "running"
-                        ? "brand"
-                        : "destructive"
-                  }
-                >
-                  {a.outcome}
-                </Badge>
-                <span>تلاش {fa(a.attempt)}</span>
-                <span>
-                  شروع: <RelativeTime iso={a.startedAt} />
-                </span>
-                {a.endedAt && (
-                  <span>
-                    پایان: <RelativeTime iso={a.endedAt} />
-                  </span>
-                )}
-              </div>
-              {Object.keys(a.detail).length > 0 && (
-                <details className="mt-2 text-xs text-muted-foreground">
-                  <summary className="cursor-pointer hover:text-foreground">جزئیات</summary>
-                  <pre
-                    className="mt-2 overflow-auto rounded-field border-line border-border bg-field p-3"
-                    dir="ltr"
-                  >
-                    {JSON.stringify(a.detail, null, 2)}
-                  </pre>
-                </details>
-              )}
-            </li>
-          ))}
-        </ol>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ArtifactsPanel({ job }: { job: Job }) {
-  const [items, setItems] = useState<Artifact[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const urls = useRef(new Set<string>());
-  const { toast } = useToast();
-
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      setItems(await jobArtifacts(job.id));
-    } catch (err) {
-      setError(errMessage(err));
-    }
-  }, [job.id]);
-
-  useEffect(() => {
-    void load();
-    return () => {
-      urls.current.forEach((u) => URL.revokeObjectURL(u));
-      urls.current.clear();
-    };
-  }, [load]);
-
-  const download = async (art: Artifact) => {
-    setBusyId(art.id);
-    try {
-      const url = await artifactDownload(job.id, art.id);
-      urls.current.add(url);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = art.filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch (err) {
-      toast({ title: "دریافت فایل ناموفق بود", description: errMessage(err), variant: "error" });
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  if (error) return <ErrorBanner message={error} onRetry={() => void load()} />;
-  if (!items)
-    return (
-      <div className="flex flex-col gap-2">
-        {Array.from({ length: 2 }).map((_, i) => (
-          <Skeleton key={i} className="h-12 w-full" />
-        ))}
-      </div>
-    );
-  if (items.length === 0)
-    return (
-      <Card>
-        <CardContent className="p-6 text-sm text-muted-foreground">
-          برای این درخواست فایلی ثبت نشده است.
-        </CardContent>
-      </Card>
-    );
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>فایل‌ها</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <ul className="flex flex-col gap-2">
-          {items.map((art) => (
-            <li
-              key={art.id}
-              className="flex items-center gap-3 rounded-field border-line border-border bg-field/40 px-3 py-2.5"
-            >
-              <FileAudio className="size-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm" dir="ltr">
-                  {art.filename}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {faFileSize(art.size)} ·{" "}
-                  {art.source === "provider" ? "از ارائه‌دهنده" : "ساخته‌شده در اپلیکیشن"}
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={busyId === art.id}
-                onClick={() => void download(art)}
-              >
-                {busyId === art.id ? <RefreshCw className="animate-spin" /> : <Download />}
-                دانلود
-              </Button>
-            </li>
-          ))}
-        </ul>
       </CardContent>
     </Card>
   );

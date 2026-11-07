@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
-import { toApiErrorBody, ApiError, ApiCodes, redactDeep } from "@nlo/shared";
+import { toApiErrorBody, ApiError, ApiCodes, MAX_SOURCES_PER_JOB, redactDeep } from "@nlo/shared";
 import { ZodError } from "zod";
 import type { AppContext } from "../app-context.js";
 import { guardAdminRoutes, registerAdminRoutes } from "./admin-auth.js";
@@ -61,7 +61,9 @@ export async function buildApp(
       fileSize: ctx.config.maxUploadBytes,
       fieldSize: 64 * 1024,
       fields: 32,
-      files: 4,
+      // One part per uploaded source (+ headroom); the route also enforces
+      // MAX_SOURCES_PER_JOB with a clear validation error.
+      files: MAX_SOURCES_PER_JOB + 4,
     },
   });
 

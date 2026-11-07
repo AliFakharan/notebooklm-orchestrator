@@ -6,7 +6,11 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./resolve-within": {
+      "types": "./src/resolve-within.ts",
+      "default": "./src/resolve-within.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

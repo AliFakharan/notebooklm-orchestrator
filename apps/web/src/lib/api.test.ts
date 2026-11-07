@@ -101,24 +101,26 @@ describe("jobsList query building", () => {
 });
 
 describe("jobCreate multipart", () => {
-  it("sends prompt and audio as multipart fields", async () => {
+  it("sends prompt and every file as repeated multipart parts", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { id: "j1", status: "CREATED" }));
     vi.stubGlobal("fetch", fetchMock);
-    const file = new File(["audio-bytes"], "a.wav", { type: "audio/wav" });
-    await jobCreate({ prompt: "hello", audio: file });
+    const a = new File(["audio-bytes"], "a.wav", { type: "audio/wav" });
+    const b = new File(["pdf-bytes"], "doc.pdf", { type: "application/pdf" });
+    await jobCreate({ prompt: "hello", files: [a, b] });
     const [, init] = fetchMock.mock.calls[0]!;
     expect(init.method).toBe("POST");
     const body = init.body as FormData;
     expect(body.get("prompt")).toBe("hello");
-    expect((body.get("audio") as File).name).toBe("a.wav");
+    const parts = body.getAll("sources") as File[];
+    expect(parts.map((f) => f.name)).toEqual(["a.wav", "doc.pdf"]);
   });
 
-  it("omits audio when not provided", async () => {
+  it("sends only the prompt when no files are provided", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(201, { id: "j2", status: "CREATED" }));
     vi.stubGlobal("fetch", fetchMock);
-    await jobCreate({ prompt: "q", audio: null });
+    await jobCreate({ prompt: "q", files: [] });
     const body = (fetchMock.mock.calls[0]![1] as RequestInit).body as FormData;
     expect(body.get("prompt")).toBe("q");
-    expect(body.get("audio")).toBeNull();
+    expect(body.getAll("sources")).toHaveLength(0);
   });
 });

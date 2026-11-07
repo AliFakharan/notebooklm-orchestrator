@@ -350,11 +350,11 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     const stageProgress: Record<string, [number, string]> = {
       opening_session: [10, "opening authenticated session"],
       selecting_notebook: [20, "selecting/creating notebook"],
-      uploading_audio: [30, "uploading audio to NotebookLM"],
-      upload_done: [50, "upload complete"],
-      waiting_for_processing: [55, "waiting for NotebookLM to process audio"],
-      processing_done: [75, "audio processed"],
-      executing_prompt: [80, "executing prompt"],
+      uploading_sources: [30, "uploading files to NotebookLM"],
+      upload_done: [55, "upload complete"],
+      waiting_for_processing: [60, "waiting for NotebookLM to process sources"],
+      processing_done: [80, "sources processed"],
+      executing_prompt: [85, "executing prompt"],
       prompt_done: [95, "prompt completed"],
     };
     w.setEventSink((data) => {
@@ -370,8 +370,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         email: string;
         notebookId: string | null;
         notebookTitle: string;
-        sourceId: string | null;
-        uploaded: boolean;
+        sources: { title: string; sourceId: string | null; reused: boolean }[];
         conversationId: string | null;
         turnNumber: number | null;
         answer: string;
@@ -379,8 +378,11 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         checkedAt: string;
       }>("job", {
         sessionPath,
-        audioPath: req.audioPath ?? "",
-        audioName: req.audioPath ? path.basename(req.audioPath) : "",
+        sources: req.sources.map((s) => ({
+          path: s.path,
+          title: s.title,
+          mediaType: s.mediaType,
+        })),
         prompt: req.prompt,
         notebookTitle,
         waitSec: 1800,
@@ -404,8 +406,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
           email: r.email,
           notebookId: r.notebookId,
           notebookTitle: r.notebookTitle,
-          sourceId: r.sourceId,
-          uploaded: r.uploaded,
+          sources: r.sources,
           conversationId: r.conversationId,
           turnNumber: r.turnNumber,
           references: r.references,

@@ -11,14 +11,15 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { safeName, resolveWithin } from "@nlo/shared";
+import { safeName } from "@nlo/shared";
+import { resolveWithin } from "@nlo/shared/resolve-within";
 
 /**
  * Request archive layout (per job, under data/jobs/<job-id>/):
  *
  *   manifest.json
  *   input/prompt.md
- *   input/audio-<safe-name>
+ *   input/sources/<i>-<safe-name>     (one entry per uploaded source)
  *   execution/timeline.jsonl
  *   execution/attempts.json
  *   execution/errors.json
@@ -69,12 +70,11 @@ export class JobArchive {
 
   init(input: {
     prompt: string;
-    originalAudioName: string | null;
-    audioMediaType: string | null;
+    sources: { originalName: string; storageName: string; mediaType: string }[];
     configSnapshot: Record<string, unknown>;
     createdAt: string;
   }): void {
-    this.ensureDir("input");
+    this.ensureDir("input/sources");
     this.ensureDir("execution");
     this.ensureDir("output/artifacts");
     this.writeText("input/prompt.md", input.prompt);
@@ -86,9 +86,12 @@ export class JobArchive {
           createdAt: input.createdAt,
           input: {
             promptFile: "input/prompt.md",
-            audio: input.originalAudioName
-              ? { originalName: input.originalAudioName, mediaType: input.audioMediaType }
-              : null,
+            sources: input.sources.map((s) => ({
+              originalName: s.originalName,
+              storageName: s.storageName,
+              mediaType: s.mediaType,
+              file: `input/sources/${s.storageName}`,
+            })),
           },
           configSnapshot: input.configSnapshot,
         },
@@ -99,13 +102,12 @@ export class JobArchive {
   }
 
   /**
-   * Store the uploaded audio under a sanitized name.
-   * Returns the sanitized file name (original name stays in the manifest).
+   * Store one uploaded source at input/sources/<storageName>. `storageName`
+   * is the server-chosen, index-prefixed sanitized name (collision-free).
    */
-  async storeAudio(tempFile: string, originalName: string): Promise<string> {
-    const safe = safeName(originalName);
-    this.ensureDir("input");
-    const dest = resolveWithin(this.jobsDir, this.jobId, "input", `audio-${safe}`);
+  async storeSource(tempFile: string, storageName: string): Promise<void> {
+    this.ensureDir("input/sources");
+    const dest = resolveWithin(this.jobsDir, this.jobId, "input", "sources", storageName);
     await new Promise<void>((resolve, reject) => {
       const read = createReadStream(tempFile);
       const write = createWriteStream(dest);
@@ -114,7 +116,6 @@ export class JobArchive {
       read.on("error", reject);
       read.pipe(write);
     });
-    return safe;
   }
 
   appendTimelineEvent(event: {

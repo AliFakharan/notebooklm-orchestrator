@@ -23,6 +23,14 @@ export interface ProviderAccountStatus {
   detail: string | null;
 }
 
+export interface ProviderJobSource {
+  /** Server-side stored path (sanitized, inside the job archive). */
+  path: string;
+  /** Original file name — used as the NotebookLM source title. */
+  title: string;
+  mediaType: string;
+}
+
 export interface ProviderJobRequest {
   jobId: string;
   accountId: string;
@@ -30,11 +38,10 @@ export interface ProviderJobRequest {
   credentialRef: string;
   prompt: string;
   /**
-   * Path to the uploaded audio (server-side, sanitized). `null` when the
-   * request has no audio. The provider decides support.
+   * Uploaded sources (0..N), any NotebookLM-permitted format. The provider
+   * uploads each as a separate NotebookLM source.
    */
-  audioPath: string | null;
-  audioMediaType: string | null;
+  sources: ProviderJobSource[];
   /**
    * The ONLY network route the provider may use. `null` means "no approved
    * tunnel" — a live provider MUST then refuse (fail-closed). Mock ignores.

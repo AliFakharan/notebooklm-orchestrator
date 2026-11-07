@@ -170,7 +170,7 @@ export function createJob(
   return jobs.create({
     input: {
       prompt,
-      audio: { originalName: "", mediaType: "", size: 0, sha256: "", providerConfirmed: false },
+      sources: [],
       preferredAccountId: extra.preferredAccountId ?? null,
       preferredNodeId: extra.preferredNodeId ?? null,
     },

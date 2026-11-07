@@ -140,20 +140,150 @@ export interface Artifact {
   createdAt: string;
 }
 
+/**
+ * Per-source metadata (one uploaded file, any NotebookLM-permitted format).
+ *
+ * `storageName` is the server-chosen archive file name (index-prefixed +
+ * sanitized) — it is stable, collision-free and the ONLY name used on disk,
+ * so the job runner can re-derive the path without ambiguity even when two
+ * sources share a file name.
+ */
+export interface JobSource {
+  /** Original file name as uploaded (display only, never used on disk). */
+  originalName: string;
+  /** Server-chosen archive file name inside input/sources/. */
+  storageName: string;
+  mediaType: string;
+  size: number;
+  sha256: string;
+  /** Supported-ness as verified against the provider (not a guess). */
+  providerConfirmed: boolean;
+}
+
 export interface JobInput {
   prompt: string;
   /** Optional human-friendly title; when absent the prompt is displayed. */
   title?: string | null;
-  audio: {
-    originalName: string;
-    mediaType: string;
-    size: number;
-    sha256: string;
-    /** Supported-ness as verified against the provider (not a guess). */
-    providerConfirmed: boolean;
-  };
+  /**
+   * Uploaded sources (0..N). Every format NotebookLM accepts is allowed
+   * (pdf, docx, pptx, csv, txt, md, epub, images, audio); see
+   * ALLOWED_SOURCE_EXTENSIONS. Each file is capped by the server's
+   * maxUploadBytes (100 MB default, mirroring NotebookLM's per-source limit).
+   */
+  sources: JobSource[];
   preferredAccountId: string | null;
   preferredNodeId: string | null;
+}
+
+/**
+ * Every file extension NotebookLM accepts as a source. Order is only
+ * cosmetic (grouped for the client's accept attribute).
+ */
+export const ALLOWED_SOURCE_EXTENSIONS = [
+  "pdf",
+  "docx",
+  "pptx",
+  "csv",
+  "txt",
+  "md",
+  "epub",
+  "avif",
+  "bmp",
+  "gif",
+  "heic",
+  "heif",
+  "ico",
+  "jp2",
+  "jpe",
+  "jpeg",
+  "jpg",
+  "png",
+  "tif",
+  "tiff",
+  "webp",
+  "3g2",
+  "3gp",
+  "aac",
+  "aif",
+  "aifc",
+  "aiff",
+  "amr",
+  "au",
+  "avi",
+  "cda",
+  "m4a",
+  "mid",
+  "mp3",
+  "mp4",
+  "mpeg",
+  "ogg",
+  "opus",
+  "ra",
+  "ram",
+  "snd",
+  "wav",
+  "wma",
+] as const;
+
+/** Max size of a single source file (NotebookLM's per-source limit). */
+export const MAX_SOURCE_BYTES = 100 * 1024 * 1024;
+
+/** Max number of sources per job. */
+export const MAX_SOURCES_PER_JOB = 20;
+
+/** Extension group a file belongs to (used for client-side accept/UI). */
+export type SourceKind = "document" | "text" | "ebook" | "image" | "audio" | "video";
+
+export function sourceKindOf(ext: string): SourceKind | null {
+  const e = ext.toLowerCase().replace(".", "");
+  if (["pdf", "docx", "pptx", "csv"].includes(e)) return "document";
+  if (["txt", "md"].includes(e)) return "text";
+  if (e === "epub") return "ebook";
+  if (
+    [
+      "avif",
+      "bmp",
+      "gif",
+      "heic",
+      "heif",
+      "ico",
+      "jp2",
+      "jpe",
+      "jpeg",
+      "jpg",
+      "png",
+      "tif",
+      "tiff",
+      "webp",
+    ].includes(e)
+  )
+    return "image";
+  if (
+    [
+      "3g2",
+      "3gp",
+      "aac",
+      "aif",
+      "aifc",
+      "aiff",
+      "amr",
+      "au",
+      "cda",
+      "m4a",
+      "mid",
+      "mp3",
+      "ogg",
+      "opus",
+      "ra",
+      "ram",
+      "snd",
+      "wav",
+      "wma",
+    ].includes(e)
+  )
+    return "audio";
+  if (["avi", "mp4", "mpeg"].includes(e)) return "video";
+  return null;
 }
 
 export type ResultProvenance = "real" | "mock" | "unknown";

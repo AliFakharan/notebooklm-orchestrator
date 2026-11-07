@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ALLOWED_SOURCE_EXTENSIONS, MAX_SOURCE_BYTES } from "@nlo/shared";
 
 export interface AppConfig {
   host: string;
@@ -10,7 +11,8 @@ export interface AppConfig {
   provider: "mock" | "python-worker";
   proxyRuntime: "mock" | "xray";
   maxUploadBytes: number;
-  allowedAudioExtensions: string[];
+  /** Every NotebookLM-permitted source extension (see shared). */
+  allowedSourceExtensions: string[];
   liveTestsEnabled: boolean;
   /** SSRF allowlist for health checks (host[:port] entries). */
   healthAllowlist: string[];
@@ -112,12 +114,14 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     throw new Error("NLO_PROXY_RUNTIME must be 'mock' or 'xray'");
   }
 
-  const maxUploadBytes = intEnv("NLO_MAX_UPLOAD_BYTES", 200 * 1024 * 1024);
+  const maxUploadBytes = intEnv("NLO_MAX_UPLOAD_BYTES", MAX_SOURCE_BYTES);
   if (maxUploadBytes > 5 * 1024 * 1024 * 1024) {
     throw new Error("NLO_MAX_UPLOAD_BYTES is unreasonably large");
   }
 
-  const allowedAudioExtensions = (env("NLO_ALLOWED_AUDIO_EXTENSIONS") ?? "wav,mp3,m4a,ogg,flac")
+  const allowedSourceExtensions = (
+    env("NLO_ALLOWED_SOURCE_EXTENSIONS") ?? ALLOWED_SOURCE_EXTENSIONS.join(",")
+  )
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
@@ -137,7 +141,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     provider: provider as AppConfig["provider"],
     proxyRuntime: proxyRuntime as AppConfig["proxyRuntime"],
     maxUploadBytes,
-    allowedAudioExtensions,
+    allowedSourceExtensions,
     liveTestsEnabled: boolEnv("NLO_LIVE_TESTS", false),
     healthAllowlist,
     admin: {

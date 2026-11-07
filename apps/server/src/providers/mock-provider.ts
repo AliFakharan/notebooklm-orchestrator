@@ -110,12 +110,14 @@ export class MockProvider implements NotebookLMProvider {
     }
 
     // Simulate the workflow steps.
-    req.onProgress(20, "mock: uploading audio source");
-    if (req.audioPath && !existsSync(req.audioPath)) {
-      fail("invalid_input", "mock: audio file missing");
+    req.onProgress(20, `mock: uploading ${req.sources.length} source(s)`);
+    for (const s of req.sources) {
+      if (!existsSync(s.path)) {
+        fail("invalid_input", `mock: source file missing: ${s.title}`);
+      }
     }
 
-    req.onProgress(45, "mock: indexing source");
+    req.onProgress(45, "mock: indexing sources");
     this.checkpoint(req.signal);
 
     req.onProgress(70, "mock: asking question");
@@ -136,6 +138,10 @@ export class MockProvider implements NotebookLMProvider {
       body: JSON.stringify({ prompt: req.prompt, simulated: true }),
     });
 
+    const sourceLines =
+      req.sources.length === 0
+        ? ["**Sources:** none"]
+        : req.sources.map((s) => `- ${s.title} (uploaded, simulated)`);
     const answer = [
       "# Mock Answer",
       "",
@@ -143,7 +149,7 @@ export class MockProvider implements NotebookLMProvider {
       "",
       `**Prompt:** ${req.prompt}`,
       "",
-      req.audioPath ? "**Audio source:** uploaded (simulated)" : "**Audio source:** none",
+      ...sourceLines,
       "",
       "The real provider (python-worker) is disabled until explicitly approved.",
     ].join("\n");
@@ -169,6 +175,11 @@ export class MockProvider implements NotebookLMProvider {
         provider: "mock",
         simulated: true,
         steps: ["upload", "index", "ask", "artifacts"],
+        sources: req.sources.map((s) => ({
+          title: s.title,
+          sourceId: null,
+          reused: false,
+        })),
       },
       artifacts: [{ name: artifactName, mediaType: "text/plain", path: artifactPath }],
     };

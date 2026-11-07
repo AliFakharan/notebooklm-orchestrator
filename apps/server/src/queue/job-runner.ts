@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { backoffMs, classifyError, isRetryableError, safeName, resolveWithin } from "@nlo/shared";
+import { backoffMs, classifyError, isRetryableError } from "@nlo/shared";
+import { resolveWithin } from "@nlo/shared/resolve-within";
 import type { Job, FailureClass } from "@nlo/shared";
 import type { JobsRepo } from "../domain/jobs.repo.js";
 import type { AccountRow, AccountsRepo } from "../domain/accounts.repo.js";
@@ -176,12 +177,15 @@ export class JobRunner {
             accountId: account.id,
             credentialRef,
             prompt: job.input.prompt,
-            audioPath: this.audioPathInArchive(
-              jobId,
-              job.input.audio.originalName,
-              job.input.audio.size,
-            ),
-            audioMediaType: job.input.audio.mediaType,
+            sources: job.input.sources
+              .map((s) => ({
+                path: this.sourcePathInArchive(jobId, s.storageName, s.size),
+                title: s.originalName,
+                mediaType: s.mediaType,
+              }))
+              .filter(
+                (s): s is { path: string; title: string; mediaType: string } => s.path !== null,
+              ),
             tunnel: handle,
             egress: this.d.egress,
             signal: controller.signal,
@@ -269,8 +273,11 @@ export class JobRunner {
     try {
       archive.init({
         prompt: job.input.prompt,
-        originalAudioName: job.input.audio.size > 0 ? job.input.audio.originalName : null,
-        audioMediaType: job.input.audio.size > 0 ? job.input.audio.mediaType : null,
+        sources: job.input.sources.map((s) => ({
+          originalName: s.originalName,
+          storageName: s.storageName,
+          mediaType: s.mediaType,
+        })),
         configSnapshot: job.configSnapshot,
         createdAt: job.createdAt,
       });
@@ -468,18 +475,12 @@ export class JobRunner {
   }
 
   /**
-   * The upload route stores audio at data/jobs/<id>/input/audio-<safeName>.
-   * We re-derive the same deterministic safe name here.
+   * The upload route stores each source at data/jobs/<id>/input/sources/<storageName>.
+   * storageName is server-generated and already collision-free.
    */
-  private audioPathInArchive(jobId: string, originalName: string, size: number): string | null {
-    if (size <= 0 || !originalName) return null;
-    let safe: string;
-    try {
-      safe = safeName(originalName);
-    } catch {
-      return null;
-    }
-    return resolveWithin(this.d.jobsDir, jobId, "input", `audio-${safe}`);
+  private sourcePathInArchive(jobId: string, storageName: string, size: number): string | null {
+    if (size <= 0 || !storageName) return null;
+    return resolveWithin(this.d.jobsDir, jobId, "input", "sources", storageName);
   }
 
   private storeArtifacts(
