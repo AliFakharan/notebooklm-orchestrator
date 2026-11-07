@@ -23,6 +23,9 @@ data/
 *.log
 logs/
 
+# agent scratch (superpowers SDD workspaces)
+.superpowers/
+
 # os/editor
 .DS_Store
 Thumbs.db
