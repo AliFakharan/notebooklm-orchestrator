@@ -302,63 +302,6 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     },
   );
 
-  // Stream one of the job's INPUT sources back to the web (player/download).
-  // The file is server-stored at data/jobs/<id>/input/sources/<storageName>;
-  // the index selects within the job's own recorded sources, and resolveWithin
-  // keeps the path inside the job dir, so no client-controlled path component
-  // exists. `download=1` switches to attachment disposition.
-  app.get<{ Params: { id: string; index: string }; Querystring: { download?: string } }>(
-    "/api/jobs/:id/sources/:index",
-    async (req, reply) => {
-      const job = ctx.jobs.get(req.params.id);
-      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-      const idx = Number(req.params.index);
-      const src =
-        Number.isInteger(idx) && idx >= 1 && idx <= job.input.sources.length
-          ? job.input.sources[idx - 1]
-          : null;
-      if (!src) {
-        throw new ApiError(ApiCodes.notFound, "source not found", 404);
-      }
-      const { createReadStream, statSync } = await import("node:fs");
-      // New layout: input/sources/<storageName>. Legacy jobs (pre multi-source)
-      // stored the single audio at input/audio-<safeName(originalName)>; fall
-      // back to it so old jobs still serve their file.
-      const jobsDir = dataPaths(ctx.config.dataDir).jobsDir;
-      let legacyName = "";
-      try {
-        legacyName = `audio-${safeName(src.originalName)}`;
-      } catch {
-        legacyName = `audio-${src.originalName}`;
-      }
-      const candidates = [
-        resolveWithin(jobsDir, job.id, "input", "sources", src.storageName),
-        resolveWithin(jobsDir, job.id, "input", legacyName),
-      ];
-      let file = "";
-      let stat;
-      for (const c of candidates) {
-        try {
-          stat = statSync(c);
-          file = c;
-          break;
-        } catch {
-          /* try next candidate */
-        }
-      }
-      if (!stat || !file) {
-        throw new ApiError(ApiCodes.notFound, "source file missing", 404);
-      }
-      const disposition = req.query.download
-        ? `attachment; filename="${encodeURIComponent(src.originalName)}"`
-        : `inline; filename="${encodeURIComponent(src.originalName)}"`;
-      reply.header("content-type", src.mediaType);
-      reply.header("content-length", stat.size);
-      reply.header("content-disposition", disposition);
-      return reply.send(createReadStream(file));
-    },
-  );
-
   app.post<{ Params: { id: string } }>("/api/jobs/:id/cancel", async (req) => {
     const job = ctx.jobs.get(req.params.id);
     if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);

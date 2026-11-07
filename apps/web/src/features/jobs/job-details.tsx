@@ -1,17 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Link, useParams } from "react-router-dom";
-import { Ban, Check, Copy, Download, FileText, RotateCcw } from "lucide-react";
+import { Ban, Check, Copy, RotateCcw } from "lucide-react";
 import type { Job } from "@nlo/shared";
-import {
-  downloadJobSource,
-  jobSourceBlobUrl,
-  jobCancel,
-  jobGet,
-  jobRequeue,
-  FAILURE_CLASS_LABELS,
-} from "@/lib/api";
-import { fa, faFileSize } from "@/lib/utils";
+import { jobCancel, jobGet, jobRequeue, FAILURE_CLASS_LABELS } from "@/lib/api";
+import { fa } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -171,7 +164,6 @@ export function JobDetailsPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <Progress value={job.progress} label="پیشرفت" showValue size="sm" />
-          {(job.input.sources ?? []).length > 0 && <JobSources job={job} />}
           {job.progressNote && <p className="text-xs text-muted-foreground">{job.progressNote}</p>}
           {job.status === "FAILED" && job.errorMessage && (
             <p
@@ -193,94 +185,6 @@ export function JobDetailsPage() {
           بازگشت به فهرست درخواست‌ها
         </Link>
       </p>
-    </div>
-  );
-}
-
-/* ---------------------------- input audio player ---------------------------- */
-
-/**
- * The sources the job was created with: a list of the uploaded files. Audio
- * sources also get an inline player (the blob is fetched once and revoked on
- * unmount).
- */
-function JobSources({ job }: { job: Job }) {
-  const sources = job.input.sources ?? [];
-  const firstAudioIndex = sources.findIndex((s) => s.mediaType.startsWith("audio/"));
-
-  return (
-    <div className="flex flex-col gap-2 rounded-field border-line border-border bg-field p-3">
-      <span className="flex items-center gap-2 text-sm font-medium">
-        <FileText className="h-4 w-4 text-muted-foreground" />
-        فایل‌های ورودی ({fa(sources.length)})
-      </span>
-      <ul className="flex flex-col gap-1.5">
-        {sources.map((s, i) => (
-          <li key={s.storageName} className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-xs" dir="ltr">
-              {s.originalName}
-            </span>
-            <span className="shrink-0 text-xs text-muted-foreground">{faFileSize(s.size)}</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`دانلود ${s.originalName}`}
-              title={`دانلود ${s.originalName}`}
-              onClick={() => void downloadJobSource(job.id, i + 1).catch(() => {})}
-            >
-              <Download className="h-3.5 w-3.5" />
-            </Button>
-          </li>
-        ))}
-      </ul>
-      {firstAudioIndex >= 0 && (
-        <AudioSourcePlayer
-          jobId={job.id}
-          index={firstAudioIndex + 1}
-          name={sources[firstAudioIndex]?.originalName ?? "فایل صوتی"}
-        />
-      )}
-    </div>
-  );
-}
-
-/** Inline player for one audio source (blob fetched once, revoked on unmount). */
-function AudioSourcePlayer({ jobId, index, name }: { jobId: string; index: number; name: string }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    let url: string | null = null;
-    void (async () => {
-      try {
-        const { url: u } = await jobSourceBlobUrl(jobId, index);
-        if (!alive) {
-          URL.revokeObjectURL(u);
-          return;
-        }
-        url = u;
-        setSrc(u);
-      } catch {
-        if (alive) setFailed(true);
-      }
-    })();
-    return () => {
-      alive = false;
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [jobId, index]);
-
-  if (failed) {
-    return <p className="text-xs text-muted-foreground">دریافت صدا برای پخش ممکن نشد.</p>;
-  }
-  if (!src) return null;
-  return (
-    <div className="flex flex-col gap-1">
-      <p className="truncate text-xs text-muted-foreground" dir="ltr">
-        پخش: {name}
-      </p>
-      <audio controls src={src} className="w-full" />
     </div>
   );
 }
