@@ -5,7 +5,10 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  rmSync,
+  rmdirSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -116,6 +119,25 @@ export class JobArchive {
       read.on("error", reject);
       read.pipe(write);
     });
+  }
+
+  /**
+   * Remove every user-uploaded source from input/sources/ and delete the
+   * (now empty) directory. Called by the runner after a job SUCCEEDS so
+   * uploads do not pile up on disk. Returns the number of files removed;
+   * 0 when the directory does not exist. fs errors propagate — the caller
+   * treats cleanup as best-effort.
+   */
+  deleteSources(): number {
+    const dir = resolveWithin(this.jobsDir, this.jobId, "input", "sources");
+    if (!existsSync(dir)) return 0;
+    let removed = 0;
+    for (const entry of readdirSync(dir)) {
+      rmSync(resolveWithin(dir, entry));
+      removed += 1;
+    }
+    rmdirSync(dir);
+    return removed;
   }
 
   appendTimelineEvent(event: {
