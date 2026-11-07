@@ -88,7 +88,7 @@
 data/jobs/<job-id>/
   manifest.json          # snapshot کامل پیکربندی + ورودی + hash فایل‌ها
   input/prompt.md
-  input/original-audio   # نام اصلی در manifest، نام فایل روی disk ایمن‌شده
+  input/sources/<i>-<safe-name>   # موقتی: بعد از SUCCEEDED توسط رانر حذف می‌شود
   execution/timeline.jsonl
   execution/attempts.json
   execution/errors.json
@@ -98,6 +98,7 @@ data/jobs/<job-id>/
 
 - job id **server-generated** است؛ هیچ‌گاه نام فایل کاربر به‌عنوان مسیر استفاده نمی‌شود.
 - `data/` خارج از Git (`.gitignore`).
+- فایل‌های ورودی موقتی هستند: رانر بلافاصله بعد از SUCCEEDED آن‌ها را حذف می‌کند (رویداد sources_cleaned در timeline).
 
 ## ۷. تصمیمات کلیدی و دلیل (preference ≠ requirement)
 
