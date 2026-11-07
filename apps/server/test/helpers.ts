@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig, dataPaths } from "../src/config.js";
@@ -13,7 +13,7 @@ import { MockProxyRuntime } from "../src/proxy/runtime.js";
 import { MockProviderEgress } from "../src/proxy/egress.js";
 import { ProxyManager } from "../src/proxy/proxy-manager.js";
 import { JobRunner } from "../src/queue/job-runner.js";
-import type { Job } from "@nlo/shared";
+import { safeName, type Job } from "@nlo/shared";
 
 export interface TestParts {
   dir: string;
@@ -176,6 +176,41 @@ export function createJob(
     },
     configSnapshot: { provider: "mock" },
   });
+}
+
+/**
+ * Create a job whose sources are REAL files on disk inside the job archive
+ * (the mock provider verifies existence before "uploading"). storageName
+ * follows the server route's scheme: `${index + 1}-${safeName(name)}`.
+ */
+export function createJobWithSources(
+  jobs: JobsRepo,
+  jobsDir: string,
+  files: { name: string; content: string; mediaType: string }[],
+  prompt = "test prompt",
+): Job {
+  const job = jobs.create({
+    input: {
+      prompt,
+      sources: files.map((f, i) => ({
+        originalName: f.name,
+        storageName: `${i + 1}-${safeName(f.name)}`,
+        mediaType: f.mediaType,
+        size: Buffer.byteLength(f.content),
+        sha256: createHash("sha256").update(f.content).digest("hex"),
+        providerConfirmed: true,
+      })),
+      preferredAccountId: null,
+      preferredNodeId: null,
+    },
+    configSnapshot: { provider: "mock" },
+  });
+  const dir = path.join(jobsDir, job.id, "input", "sources");
+  mkdirSync(dir, { recursive: true });
+  files.forEach((f, i) => {
+    writeFileSync(path.join(dir, `${i + 1}-${safeName(f.name)}`), f.content);
+  });
+  return job;
 }
 
 /** Build a full AppContext (with queue) on a temp data dir — for API tests. */

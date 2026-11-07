@@ -6,6 +6,7 @@ import {
   addAccount,
   addNode,
   createJob,
+  createJobWithSources,
   markHealthy,
   type TestParts,
 } from "./helpers.js";
@@ -176,5 +177,50 @@ describe("cancellation", () => {
     const result = await parts.runner.run(job.id);
     expect(result.status).toBe("VALIDATING");
     expect(parts.jobs.attempts(job.id)).toHaveLength(0);
+  });
+});
+
+describe("input source cleanup after success", () => {
+  const wav = { name: "talk.wav", content: "RIFFmock", mediaType: "audio/wav" };
+  const txt = { name: "notes.txt", content: "hello world", mediaType: "text/plain" };
+
+  function timelineTypes(root: string): string[] {
+    return readFileSync(path.join(root, "execution", "timeline.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => (JSON.parse(l) as { type: string }).type);
+  }
+
+  it("deletes input sources after SUCCEEDED; keeps prompt, answer and artifacts", async () => {
+    setupHappy();
+    const job = createJobWithSources(parts.jobs, parts.jobsDir, [wav, txt]);
+    const result = await parts.runner.run(job.id);
+
+    expect(result.status).toBe("SUCCEEDED");
+    // The provider actually consumed the files (the mock lists them in its answer).
+    expect(result.answerMarkdown).toMatch(/talk\.wav \(uploaded, simulated\)/);
+
+    const root = path.join(parts.jobsDir, job.id);
+    expect(existsSync(path.join(root, "input", "sources"))).toBe(false);
+    expect(existsSync(path.join(root, "input", "prompt.md"))).toBe(true);
+    expect(existsSync(path.join(root, "output", "answer.md"))).toBe(true);
+    const art = parts.db.raw
+      .prepare("SELECT storage_key FROM artifacts WHERE job_id = ?")
+      .all(job.id) as { storage_key: string }[];
+    expect(art).toHaveLength(1);
+    expect(existsSync(path.join(root, art[0]!.storage_key))).toBe(true);
+    expect(timelineTypes(root)).toContain("sources_cleaned");
+  });
+
+  it("keeps input sources when the job FAILS (re-queueable) and logs no cleanup", async () => {
+    const { acct } = setupHappy();
+    parts.provider.setScenario(acct.id, "auth");
+    const job = createJobWithSources(parts.jobs, parts.jobsDir, [wav]);
+    const result = await parts.runner.run(job.id);
+
+    expect(result.status).toBe("FAILED");
+    const root = path.join(parts.jobsDir, job.id);
+    expect(existsSync(path.join(root, "input", "sources", "1-talk.wav"))).toBe(true);
+    expect(timelineTypes(root)).not.toContain("sources_cleaned");
   });
 });

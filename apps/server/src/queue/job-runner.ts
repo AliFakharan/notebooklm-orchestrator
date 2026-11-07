@@ -213,6 +213,7 @@ export class JobRunner {
           });
           if (result.answerMarkdown) archive.writeAnswer(result.answerMarkdown);
           this.logEvent(jobId, archive, "succeeded", "job completed");
+          this.cleanupSources(jobId, archive);
           this.finalizeArchive(jobId, archive);
           return this.d.jobs.getOrThrow(jobId);
         } catch (err) {
@@ -481,6 +482,28 @@ export class JobRunner {
   private sourcePathInArchive(jobId: string, storageName: string, size: number): string | null {
     if (size <= 0 || !storageName) return null;
     return resolveWithin(this.d.jobsDir, jobId, "input", "sources", storageName);
+  }
+
+  /**
+   * Best-effort removal of the user's uploaded source files after success:
+   * the job has its answer and SUCCEEDED is terminal (never re-queued), so
+   * the inputs no longer serve any purpose. A cleanup failure must never
+   * fail the job — it is only logged.
+   */
+  private cleanupSources(jobId: string, archive: JobArchive): void {
+    try {
+      const removed = archive.deleteSources();
+      this.logEvent(
+        jobId,
+        archive,
+        "sources_cleaned",
+        `removed ${removed} input source file(s) after success`,
+      );
+    } catch (err) {
+      const msg = redact(String(err));
+      this.d.log(`source cleanup failed for ${jobId}: ${msg}`);
+      this.logEvent(jobId, archive, "sources_cleanup_failed", msg);
+    }
   }
 
   private storeArtifacts(
