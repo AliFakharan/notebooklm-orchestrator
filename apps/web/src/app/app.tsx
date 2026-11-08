@@ -6,6 +6,7 @@ import { CreateJobPage } from "@/features/jobs/create-job";
 import { JobHistoryPage } from "@/features/jobs/job-history";
 import { JobDetailsPage } from "@/features/jobs/job-details";
 import { AdminAccountsPage, AdminGate, AdminProxiesPage, AdminShell } from "@/features/admin/admin";
+import { AdminApiKeysPage } from "@/features/admin/api-keys";
 
 /**
  * Application root: local single-user app (no login — the server is
@@ -35,6 +36,7 @@ export function App() {
               <Route index element={<Navigate to="accounts" replace />} />
               <Route path="accounts" element={<AdminAccountsPage />} />
               <Route path="proxies" element={<AdminProxiesPage />} />
+              <Route path="api-keys" element={<AdminApiKeysPage />} />
             </Route>
           </Route>
         </Routes>

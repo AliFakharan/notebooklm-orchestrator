@@ -9,6 +9,7 @@
  */
 import type {
   AccountStatus,
+  ApiKeyInfo,
   Artifact,
   CapabilityLevel,
   FailureClass,
@@ -265,6 +266,32 @@ export function adminLogout(): Promise<{ ok: boolean }> {
 
 export function adminMe(): Promise<AdminStatus> {
   return request("/api/admin/me");
+}
+
+/* -------------------------------- api keys -------------------------------- */
+
+/** Metadata for a key — NEVER carries the raw key. */
+export type { ApiKeyInfo };
+
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  /** The raw key — shown exactly once, at creation. */
+  key: string;
+  prefix: string;
+  createdAt: string;
+}
+
+export function apiKeysList(): Promise<ApiKeyInfo[]> {
+  return request("/api/api-keys");
+}
+
+export function apiKeyCreate(name: string): Promise<ApiKeyCreated> {
+  return request("/api/api-keys", jsonInit("POST", { name }));
+}
+
+export function apiKeyRevoke(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/api-keys/${id}/revoke`, { method: "POST" });
 }
 
 /* --------------------------------- proxies --------------------------------- */

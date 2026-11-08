@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   accountsList,
   ApiClientError,
+  apiKeyCreate,
+  apiKeyRevoke,
+  apiKeysList,
   jobCreate,
   jobsList,
   NetworkError,
@@ -97,6 +100,57 @@ describe("jobsList query building", () => {
     await jobsList();
     const [url] = fetchMock.mock.calls[0]!;
     expect(url).toBe("/api/jobs");
+  });
+});
+
+describe("api key helpers", () => {
+  it("apiKeysList GETs /api/api-keys", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, [
+        {
+          id: "ak_1",
+          name: "litellm",
+          prefix: "nlo_ab12",
+          createdAt: "2026-11-07T00:00:00Z",
+          lastUsedAt: null,
+          revokedAt: null,
+        },
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const list = await apiKeysList();
+    expect(list[0]!.prefix).toBe("nlo_ab12");
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/api-keys");
+  });
+
+  it("apiKeyCreate POSTs { name } and returns the create envelope (incl. raw key)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        id: "ak_2",
+        name: "litellm",
+        key: "nlo_rawkey",
+        prefix: "nlo_rawk",
+        createdAt: "2026-11-07T00:00:00Z",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const created = await apiKeyCreate("litellm");
+    expect(created.key).toBe("nlo_rawkey");
+    expect(created.prefix).toBe("nlo_rawk");
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/api-keys");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(JSON.stringify({ name: "litellm" }));
+  });
+
+  it("apiKeyRevoke POSTs /api/api-keys/:id/revoke", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+    await apiKeyRevoke("ak_deadbeefdeadbeef");
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/api-keys/ak_deadbeefdeadbeef/revoke");
+    expect(init.method).toBe("POST");
   });
 });
 

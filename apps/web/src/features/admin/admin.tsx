@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
-import { Cable, LockKeyhole, Users } from "lucide-react";
+import { Cable, KeyRound, LockKeyhole, Users } from "lucide-react";
 import { adminLogin, adminMe, type AdminStatus } from "@/lib/api";
 import { AppShell, type NavItem } from "@/app/app-layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,11 +19,13 @@ import { ProxiesPage } from "@/features/proxies/proxies";
 const ADMIN_NAV: NavItem[] = [
   { to: "/admin/accounts", label: "حساب‌ها", icon: Users, end: true, group: "زیرساخت" },
   { to: "/admin/proxies", label: "پراکسی‌ها", icon: Cable, end: true, group: "زیرساخت" },
+  { to: "/admin/api-keys", label: "کلیدهای API", icon: KeyRound, end: true, group: "زیرساخت" },
 ];
 
 function adminTitle(path: string): string {
   if (path === "/admin/proxies") return "پراکسی‌ها";
   if (path === "/admin/accounts") return "حساب‌ها";
+  if (path === "/admin/api-keys") return "کلیدهای API";
   return "ورود به بخش زیرساخت";
 }
 
