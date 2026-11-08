@@ -347,3 +347,13 @@ export interface ProviderCapability {
   level: CapabilityLevel;
   note?: string;
 }
+
+/** An API key as exposed by the management API — never the raw key or its hash. */
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
