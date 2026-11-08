@@ -25,6 +25,8 @@ logs/
 
 # agent scratch (superpowers SDD workspaces)
 .superpowers/
+.roo/
+docs/superpowers/
 
 # os/editor
 .DS_Store
