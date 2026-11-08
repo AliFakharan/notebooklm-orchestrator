@@ -22,7 +22,7 @@ import type { AppContext } from "../app-context.js";
  * timingSafeEqual) so a wrong password is not distinguishable by timing.
  */
 
-const COOKIE = "nlo_admin";
+export const COOKIE = "nlo_admin";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 
 export interface AdminAuth {
@@ -79,7 +79,20 @@ export function createAdminAuth(config: AppContext["config"]): AdminAuth {
   };
 }
 
-function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+/**
+ * Production gate: the server must run with the admin gate enabled
+ * (keys + infrastructure API). The disabled-gate mode is test/programmatic
+ * only; main.ts calls this at startup and refuses to boot when it throws.
+ */
+export function assertAdminConfigured(config: AppContext["config"]): void {
+  if (!config.admin.enabled) {
+    throw new Error(
+      "admin credentials are required: set NLO_ADMIN_USER and NLO_ADMIN_PASSWORD in your .env",
+    );
+  }
+}
+
+export function parseCookies(cookieHeader: string | undefined): Record<string, string> {
   const out: Record<string, string> = {};
   if (!cookieHeader) return out;
   for (const part of cookieHeader.split(";")) {

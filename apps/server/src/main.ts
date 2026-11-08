@@ -5,6 +5,7 @@ import { redactSecrets } from "@nlo/shared";
 import { loadConfig, loadDotEnv } from "./config.js";
 import { createAppContext } from "./app-context.js";
 import { buildApp } from "./api/server.js";
+import { assertAdminConfigured } from "./api/admin-auth.js";
 
 /**
  * True when running inside a container (Docker sets /.dockerenv; some runtimes
@@ -30,6 +31,14 @@ function inContainer(): boolean {
 async function main(): Promise<void> {
   loadDotEnv();
   const config = loadConfig();
+  // Production must always run with the admin gate enabled; the disabled
+  // gate mode is test/programmatic-only. Refuse to boot without credentials.
+  try {
+    assertAdminConfigured(config);
+  } catch (err) {
+    console.error(`[nlo] FATAL: ${String((err as Error).message)}`);
+    process.exit(1);
+  }
   const ctx = createAppContext(config);
 
   // Detect the built frontend first so buildApp can wire the SPA fallback
@@ -60,13 +69,17 @@ async function main(): Promise<void> {
   if ((config.host === "0.0.0.0" || config.host === "::") && !inContainer()) {
     if (config.admin.enabled) {
       console.warn(
-        `[nlo] WARNING: bound to all interfaces — the infrastructure API is protected by the ` +
-          `admin gate (NLO_ADMIN_USER/NLO_ADMIN_PASSWORD); the jobs API remains open.`,
+        `[nlo] WARNING: bound to all interfaces — non-loopback callers need an API key ` +
+          `(Authorization: Bearer), a valid admin cookie (browsers after /admin login), or a ` +
+          `trusted IP (NLO_TRUSTED_IPS); the jobs API stays open to loopback.`,
       );
     } else {
+      // Dev-only: the fail-fast above makes this branch unreachable in main()
+      // while it is in place. Kept as a defense if it is ever removed.
       console.warn(
-        `[nlo] WARNING: bound to all interfaces without any auth — do NOT expose this to a network. ` +
-          `Set NLO_ADMIN_USER/NLO_ADMIN_PASSWORD to at least gate the infrastructure API.`,
+        `[nlo] WARNING: bound to all interfaces with the admin gate disabled — do NOT expose ` +
+          `this to a network. The jobs API and the key-management API are open in this mode; ` +
+          `set NLO_ADMIN_USER/NLO_ADMIN_PASSWORD to gate them.`,
       );
     }
   }

@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dataPaths, loadConfig, type AppConfig } from "./config.js";
 import { Db } from "./db/db.js";
 import { AccountsRepo } from "./domain/accounts.repo.js";
+import { ApiKeyRepo } from "./domain/api-keys.repo.js";
 import { AuthSessionsRepo } from "./domain/auth-sessions.repo.js";
 import { JobsRepo } from "./domain/jobs.repo.js";
 import { ProxiesRepo } from "./domain/proxies.repo.js";
@@ -37,6 +38,8 @@ export interface AppContext {
   queue: Queue;
   /** Admin gate for the infrastructure API (disabled unless env credentials set). */
   adminAuth: AdminAuth;
+  /** API keys for machine-to-machine access to the job surface. */
+  apiKeys: ApiKeyRepo;
   close(): Promise<void>;
 }
 
@@ -50,6 +53,7 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
   const vault = SecretVault.open(db, { keyHex: config.vaultKey, keyFile: paths.vaultKeyFile });
   const accounts = new AccountsRepo(db);
   const sessions = new AuthSessionsRepo(db);
+  const apiKeys = new ApiKeyRepo(db);
   const proxies = new ProxiesRepo(db);
   const jobs = new JobsRepo(db);
 
@@ -171,6 +175,7 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     runner,
     queue,
     adminAuth: createAdminAuth(config),
+    apiKeys,
     close: async () => {
       await queue.stop();
       (provider as { dispose?: () => void }).dispose?.();

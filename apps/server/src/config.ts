@@ -24,6 +24,11 @@ export interface AppConfig {
    * is never logged.
    */
   admin: { user: string; password: string; enabled: boolean };
+  /**
+   * Source IPs (beyond loopback) allowed on the job surface without
+   * credentials — deployment escape hatch, e.g. the Docker bridge gateway.
+   */
+  trustedIps: string[];
   /** Python interpreter for the notebooklm worker (default "python3"). */
   pythonBin: string;
   /**
@@ -150,6 +155,10 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
       enabled:
         (env("NLO_ADMIN_USER") ?? "").length > 0 && (env("NLO_ADMIN_PASSWORD") ?? "").length > 0,
     },
+    trustedIps: (env("NLO_TRUSTED_IPS") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),

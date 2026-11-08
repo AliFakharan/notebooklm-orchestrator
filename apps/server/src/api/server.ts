@@ -6,6 +6,7 @@ import { toApiErrorBody, ApiError, ApiCodes, MAX_SOURCES_PER_JOB, redactDeep } f
 import { ZodError } from "zod";
 import type { AppContext } from "../app-context.js";
 import { guardAdminRoutes, registerAdminRoutes } from "./admin-auth.js";
+import { guardJobApiRoutes } from "./api-key-auth.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerJobRoutes } from "./routes/jobs.js";
 import { registerAccountRoutes } from "./routes/accounts.js";
@@ -132,6 +133,8 @@ export async function buildApp(
   // when credentials are configured. The guard is added last so the admin
   // login routes above are reachable without a cookie.
   guardAdminRoutes(app, ctx);
+  // Job surface (/api/jobs*): loopback / trusted IP / admin cookie / API key.
+  guardJobApiRoutes(app, ctx);
 
   return app;
 }
