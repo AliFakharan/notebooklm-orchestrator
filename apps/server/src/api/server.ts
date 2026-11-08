@@ -20,9 +20,13 @@ import { registerApiKeyRoutes } from "./routes/api-keys.js";
 /**
  * Build the Fastify app. Binds to config.host (default 127.0.0.1).
  * Security (local single-user model):
- *  - loopback-only binding by default; there is NO user system and NO
- *    bearer token — the trust boundary is the machine, so never bind to
- *    0.0.0.0 on an exposed interface (main.ts warns when it happens)
+ *  - loopback-only binding by default; the default trust boundary is the
+ *    machine, so never bind to 0.0.0.0 on an exposed interface (main.ts
+ *    warns when it happens)
+ *  - admin credentials (NLO_ADMIN_USER/NLO_ADMIN_PASSWORD) are required to
+ *    boot (assertAdminConfigured); the infrastructure API
+ *    (accounts/proxies/sessions/api-keys) is behind the admin cookie
+ *  - job surface (/api/jobs*): trusted IP / admin cookie / Bearer API key
  *  - rate limiting
  *  - consistent error envelope with redaction (never leak secrets/stacks)
  *  - CORS restricted to loopback origins

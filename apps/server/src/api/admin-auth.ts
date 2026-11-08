@@ -123,8 +123,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         description:
           "Username + password from NLO_ADMIN_USER / NLO_ADMIN_PASSWORD. On success sets an " +
           "HttpOnly, SameSite=Strict `nlo_admin` cookie (12h). When the gate is disabled the " +
-          "call is a successful no-op (gated: false). Missing/missing-typed fields are a bad " +
-          "login (401), never a 400 — that is why they are optional in the schema.",
+          "call is a successful no-op (gated: false). Missing fields are a bad login (401) — " +
+          "that is why they are optional in the schema; non-string values are rejected 400 " +
+          "by validation.",
         body: {
           type: "object",
           properties: {
