@@ -13,6 +13,7 @@ import { registerAccountRoutes } from "./routes/accounts.js";
 import { registerProxyRoutes } from "./routes/proxies.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerApiKeyRoutes } from "./routes/api-keys.js";
 
 /**
  * Build the Fastify app. Binds to config.host (default 127.0.0.1).
@@ -129,6 +130,7 @@ export async function buildApp(
   registerProxyRoutes(app, ctx);
   registerProviderRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
+  registerApiKeyRoutes(app, ctx);
   // Infrastructure API (accounts/proxies/sessions) requires the admin cookie
   // when credentials are configured. The guard is added last so the admin
   // login routes above are reachable without a cookie.
