@@ -55,11 +55,16 @@
 ## ۶. شبکه و دسترسی
 
 - binding پیش‌فرض: `127.0.0.1`. تغییر به `0.0.0.0` فقط با env صریح + هشدار (سرور در این حالت هشدار می‌دهد).
-- **مدل تک‌کاربر/محلی + دروازه‌ی admin اختیاری:** جریان کار (نمای کلی، درخواست جدید، تاریخچه، جزئیات) باز است؛ اما APIهای زیرساخت (حساب‌ها، پراکسی‌ها، sessionها) با `NLO_ADMIN_USER`/`NLO_ADMIN_PASSWORD` قابل قفل‌کردن‌اند:
-  - با تنظیم هر دو، `POST /api/admin/login` (کاربری/رمز) یک cookie `nlo_admin` (HttpOnly, SameSite=Strict, ۱۲ ساعت) می‌دهد؛ `GET /api/admin/me` وضعیت را می‌گوید؛ `POST /api/admin/logout` پاک می‌کند.
-  - بدون cookie معتبر، همه‌ی `/api/accounts|proxies|sessions` با `401` پاسخ می‌دهند (onRequest hook). مقایسای رمز timing-safe است (SHA-256 هر دو سمت + `timingSafeEqual`).
-  - در نبود envها (پیش‌فرض محلی/توسعه) دروازه غیرفعال است و رفتار قدیمی (باز) حفظ می‌شود.
-  - به‌همین‌دلیل سرور پیش‌فرض فقط روی loopback گوش می‌کند و اگر روی `0.0.0.0` bind شود، در استارت هشدار می‌دهد. برای دسترسی از دستگاه‌های دیگر، دروازه‌ی admin را فعال کنید یا از reverse-proxy با احراز هویت استفاده کنید.
+- **دروازه‌ی admin — اجباری در اجرا:** `NLO_ADMIN_USER`/`NLO_ADMIN_PASSWORD` در هر اجرای واقعی الزامی‌اند؛ `main.ts` بدون آن‌ها استارت را رد می‌کند (FATAL). حالت «دروازه غیرفعال» (APIهای باز) فقط برای تست و ساخت مستقیم برنامه‌ای app باقی مانده است.
+  - `POST /api/admin/login` (کاربری/رمز) یک cookie `nlo_admin` (HttpOnly, SameSite=Strict, ۱۲ ساعت) می‌دهد؛ `GET /api/admin/me` وضعیت را می‌گوید؛ `POST /api/admin/logout` پاک می‌کند. مقایسای رمز timing-safe است (SHA-256 هر دو سمت + `timingSafeEqual`).
+  - **APIهای زیرساخت** (`/api/accounts|proxies|sessions|api-keys`) فقط با cookie admin معتبر باز می‌شوند؛ بدون آن `401` (onRequest hook). استثنا برای IP وجود ندارد: وقتی دروازه فعال است، حتی کلاینت loopback باید کوکی داشته باشد.
+- **سه مسیر دسترسی به سطح job (`/api/jobs*`)** — اولین موردِ برنده:
+  1. **loopback / IP مورد اعتماد** — `127.0.0.1`/`::1` یا IPهای `NLO_TRUSTED_IPS` (فهرست جداشده با ویرگول) بدون اعتبارنامه. در Docker، درخواست مرورگر هاست از gateway بریج (`172.17.0.1`) وارد کانتینر می‌شود؛ compose پیش‌فرض آن را می‌گذارد تا UI وب از بیرون کانتینر کار کند.
+  2. **cookie admin** — مرورگرها بعد از ورود در `/admin` (کوکی `Path=/` است).
+  3. **کلید API** — `Authorization: Bearer nlo_…` برای کلاینت‌های برنامه‌ای.
+- **کلیدهای API:** در DB فقط `hex(sha256(raw))` ذخیره می‌شود؛ کلید خام (`nlo_` + ۴۳ کاراکتر تصادفی) فقط یک‌بار، در پاسخ ساخت (`POST /api/api-keys`، نیازمند cookie admin) برگردانده می‌شود و در list/verify هرگز ظاهر نمی‌شود (فقط prefix mask‌شده). لغو soft است (`revokedAt` ست می‌شود و verify کلید را رد می‌کند).
+- `GET /api/provider` و `/api/health` بدون اعتبارنامه هستند — مرز اعتماد آن‌ها loopback-binding است.
+- به‌همین‌دلیل سرور پیش‌فرض فقط روی loopback گوش می‌کند و اگر روی `0.0.0.0` bind شود، در استارت هشدار می‌دهد. برای دسترسی از دستگاه‌های دیگر، از مسیرهای بالا (کلید API / cookie admin / trusted IP) یا reverse-proxy با احراز هویت استفاده کنید.
 - rate-limit روی API (بافت پیش‌فرض).
 - graceful shutdown: در-flight jobs به `QUEUED` برمی‌گردند؛ listen socket بسته می‌شود؛ worker فرزند (در صورت وجود) SIGTERM→SIGKILL.
 
@@ -87,13 +92,15 @@
 
 ## ۹. وضعیت پیاده‌سازی vs برنامه
 
-| کنترل                            | وضعیت                                                  |
-| -------------------------------- | ------------------------------------------------------ |
-| fail-closed egress               | پیاده‌سازی + test (mock transport)                     |
-| SSRF allowlist                   | پیاده‌سازی + test                                      |
-| vault AES-256-GCM                | پیاده‌سازی + test (roundtrip، redaction، no-plaintext) |
-| path safety                      | پیاده‌سازی + test                                      |
-| DOMPurify                        | پیاده‌سازی (فرونت)                                     |
-| loopback bind                    | پیش‌فرض + test                                         |
-| Xray real egress                 | **غیرفعال** — نیازمند تأیید و نصب                      |
-| egress verification واقعی (live) | **غیرفعال**                                            |
+| کنترل                             | وضعیت                                                  |
+| --------------------------------- | ------------------------------------------------------ |
+| fail-closed egress                | پیاده‌سازی + test (mock transport)                     |
+| SSRF allowlist                    | پیاده‌سازی + test                                      |
+| vault AES-256-GCM                 | پیاده‌سازی + test (roundtrip، redaction، no-plaintext) |
+| path safety                       | پیاده‌سازی + test                                      |
+| DOMPurify                         | پیاده‌سازی (فرونت)                                     |
+| loopback bind                     | پیش‌فرض + test                                         |
+| دروازه‌ی admin اجباری             | پیاده‌سازی + test (login / 401 / cookie)               |
+| کلیدهای API (Bearer, soft revoke) | پیاده‌سازی + test (ساخت / list / verify / revoke)      |
+| Xray real egress                  | **غیرفعال** — نیازمند تأیید و نصب                      |
+| egress verification واقعی (live)  | **غیرفعال**                                            |

@@ -29,9 +29,15 @@
 
 ## اجرا
 
+**در هر دو حالت، دو env اجباری** هستند: `NLO_ADMIN_USER` و `NLO_ADMIN_PASSWORD`
+(ورود پنل `/admin` و قفل APIهای زیرساخت) — سرور بدون آن‌ها استارت را رد می‌کند.
+
 **ساده‌ترین راه (Docker):**
 
 ```bash
+# در .env کنار docker-compose.yml:
+#   NLO_ADMIN_USER=…
+#   NLO_ADMIN_PASSWORD=…      (compose بدون آن‌ها خطا می‌دهد)
 docker compose up --build -d     # UI روی http://127.0.0.1:4870
 ```
 
@@ -40,6 +46,7 @@ docker compose up --build -d     # UI روی http://127.0.0.1:4870
 ```bash
 npm install
 npm run build
+cp .env.example .env             # خطوط NLO_ADMIN_USER / NLO_ADMIN_PASSWORD را فعال و تکمیل کن
 npm run start --workspace @nlo/server   # UI + API روی http://127.0.0.1:4870
 ```
 
@@ -47,6 +54,26 @@ server همان `apps/web/dist` را با SPA fallback سرو می‌کند (ی�
 API + وب). مسیرهای /api در 404، envelope JSON نگه می‌مانند.
 حالت پیش‌فرض **mock** است؛ حالت زنده (حساب گوگل واقعی + پراکسی Xray) در بخش
 زیر و در [`docs/quick-start.md`](docs/quick-start.md) توضیح داده شده.
+
+### API و کلیدها
+
+سطح job (`/api/jobs*`) API برنامه‌ای دارد؛ مهندسی کامل (OpenAPI) در
+**`/documentation`** (Swagger UI). سه مسیر دسترسی: کلاینت‌های loopback بدون
+اعتبارنامه؛ مرورگرها با cookie admin (ورود در `/admin`)؛ و کلاینت‌های
+برنامه‌ای با **کلید API**:
+
+1. در `/admin` ← «کلیدهای API» یک کلید بسازید — کلید (`nlo_…`) فقط یک‌بار
+   نمایش داده می‌شود؛ آن را ذخیره کنید.
+2. ساخت درخواست:
+
+   ```bash
+   curl -F "prompt=…" -F "sources=@doc.pdf" \
+     -H "Authorization: Bearer nlo_…" http://127.0.0.1:4870/api/jobs
+   ```
+
+3. خواندن نتیجه: `GET /api/jobs/<id>` — متن پاسخ در `answerMarkdown` است.
+
+جزئیات: [`docs/architecture.md`](docs/architecture.md) (بخش «دسترسی به API»).
 
 ### استقرار روی سرور
 
@@ -93,6 +120,7 @@ npm run build        # build وب + typecheck سرور
 ## ایمنی — خلاصه‌ی خط‌مشی
 
 - binding پیش‌فرض **loopback**؛ هیچ دسترسی عمومی.
+- **دروازه‌ی admin اجباری** است: اجرای واقعی بدون `NLO_ADMIN_USER`/`NLO_ADMIN_PASSWORD` ممکن نیست؛ سطح job با loopback/IP مورد اعتماد، cookie admin یا کلید API (Bearer) باز می‌شود.
 - ترافیک provider **fail-closed**: بدون پروکسیِ تأییدشده، direct egress نمی‌شود (تست‌شده با mock transport).
 - secretها در vault با **AES-256-GCM**؛ UUID VLESS masked؛ logها redact.
 - پیش‌فرض **mock** است؛ حالت زنده فقط با انتخاب صریح (`NLO_PROVIDER=python-worker` +
