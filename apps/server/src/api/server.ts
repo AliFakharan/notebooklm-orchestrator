@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import { toApiErrorBody, ApiError, ApiCodes, MAX_SOURCES_PER_JOB, redactDeep } from "@nlo/shared";
 import { ZodError } from "zod";
 import type { AppContext } from "../app-context.js";
@@ -67,6 +69,87 @@ export async function buildApp(
       // MAX_SOURCES_PER_JOB with a clear validation error.
       files: MAX_SOURCES_PER_JOB + 4,
     },
+  });
+
+  // --- OpenAPI spec + Swagger UI ------------------------------------------
+  // Registered BEFORE the route registrations: the spec is built via the
+  // onRoute hook, which must exist when each route is added. Routes added
+  // afterwards (including swagger-ui's own) are picked up too.
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: "NotebookLM Orchestrator API",
+        version: "0.1.0",
+        description:
+          "Programmatic access to the job surface (create, list, inspect, cancel, " +
+          "requeue, retry) plus admin-gated infrastructure routes (accounts, " +
+          "proxies, sessions, providers, api keys). " +
+          "Interactive UI: /documentation",
+      },
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: "http",
+            scheme: "bearer",
+            bearerFormat: "API key (nlo_\u2026)",
+          },
+          adminCookie: {
+            type: "apiKey",
+            in: "header",
+            name: "Cookie",
+            description: "nlo_admin session cookie (from POST /api/admin/login)",
+          },
+        },
+      },
+    },
+  });
+  await app.register(swaggerUi, { routePrefix: "/documentation" });
+
+  // Shared response schemas, registered via addSchema (NOT in the openapi
+  // config above): route-level `response` schemas must resolve `$ref`s at
+  // serializer build time (fast-json-stringify only sees addSchema'd schemas
+  // as external refs — `#/components/...` refs from the config are
+  // invisible to it), while @fastify/swagger renders these under
+  // components/schemas in the spec. Must be added before the routes.
+  app.addSchema({
+    $id: "Error",
+    type: "object",
+    required: ["error"],
+    properties: {
+      error: {
+        type: "object",
+        required: ["code", "message"],
+        properties: {
+          code: { type: "string", description: "Machine-readable error code" },
+          message: { type: "string" },
+          details: { description: "Optional validation/failure details (redacted)" },
+        },
+      },
+    },
+  });
+  app.addSchema({
+    $id: "JobSummary",
+    type: "object",
+    required: ["id", "status", "answerMarkdown", "createdAt"],
+    properties: {
+      id: { type: "string", example: "j_0123456789abcdef0123456789abcdef" },
+      status: {
+        type: "string",
+        description: "CREATED | RUNNING | SUCCEEDED | FAILED | CANCELLED",
+      },
+      answerMarkdown: {
+        type: ["string", "null"],
+        description: "The output — the provider's markdown answer (null until success).",
+      },
+      createdAt: { type: "string", format: "date-time" },
+    },
+    // additionalProperties: true matters twice: the spec documents the core
+    // fields, and fast-json-stringify (route serializers) passes through the
+    // rest of the job object instead of silently dropping it.
+    additionalProperties: true,
+    description:
+      "The full job object also carries input, accountId/nodeId, attempt budget, " +
+      "progress, error fields, and provenance.",
   });
 
   // --- consistent error handling ------------------------------------------

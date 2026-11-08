@@ -50,7 +50,7 @@ export function guardJobApiRoutes(app: FastifyInstance, ctx: AppContext): void {
     const header = req.headers.authorization;
     if (typeof header === "string") {
       const m = header.match(/^Bearer\s+(\S+)$/);
-      if (m && ctx.apiKeys.verify(m[1])) return;
+      if (m?.[1] && ctx.apiKeys.verify(m[1])) return;
     }
 
     reply

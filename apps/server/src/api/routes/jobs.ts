@@ -69,215 +69,425 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
   // NotebookLM-permitted format). The Google account is chosen automatically
   // (the default account, else the most recently successful eligible one) —
   // there is no per-job account/proxy selection.
-  app.post("/api/jobs", async (req, reply) => {
-    const fields: Record<string, string> = {};
-    // The multipart iterator only advances past a file part once its stream is
-    // consumed, so we MUST drain each file stream INSIDE the loop (to a temp
-    // file) or the request hangs forever. More than MAX_SOURCES_PER_JOB files
-    // are rejected with a clear validation error.
-    const uploads: { filename: string; type: string; tempPath: string }[] = [];
-    let droppedFiles = 0;
+  app.post(
+    "/api/jobs",
+    {
+      schema: {
+        summary: "Create a job (multipart/form-data)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description:
+          "Creates a job from `multipart/form-data`: field `prompt` (string, required), " +
+          "optional field `title` (string), and repeated file parts (any " +
+          "NotebookLM-supported extension; up to the configured source limit). The " +
+          "Google account and proxy are chosen automatically at run time. Also " +
+          "reachable from loopback or with a valid admin cookie.",
+        // No `body` schema on this route, by design: the multipart body is a
+        // stream consumed via req.parts() (req.body stays undefined), so any
+        // constraint-bearing body schema would 400 valid uploads. The field
+        // contract (prompt required, title optional, repeated file parts) is
+        // documented in the description above.
+        response: {
+          201: {
+            type: "object",
+            required: ["id", "status"],
+            properties: {
+              id: { type: "string" },
+              status: { type: "string" },
+            },
+          },
+          400: { $ref: "Error" },
+          413: { $ref: "Error" },
+        },
+      },
+    },
+    async (req, reply) => {
+      const fields: Record<string, string> = {};
+      // The multipart iterator only advances past a file part once its stream is
+      // consumed, so we MUST drain each file stream INSIDE the loop (to a temp
+      // file) or the request hangs forever. More than MAX_SOURCES_PER_JOB files
+      // are rejected with a clear validation error.
+      const uploads: { filename: string; type: string; tempPath: string }[] = [];
+      let droppedFiles = 0;
 
-    try {
-      for await (const part of req.parts()) {
-        if (part.type === "file") {
-          if (uploads.length >= MAX_SOURCES_PER_JOB) {
-            await drainStream(part.file);
-            droppedFiles++;
-            continue;
+      try {
+        for await (const part of req.parts()) {
+          if (part.type === "file") {
+            if (uploads.length >= MAX_SOURCES_PER_JOB) {
+              await drainStream(part.file);
+              droppedFiles++;
+              continue;
+            }
+            const tempPath = await saveMultipartToTemp(ctx, part.file);
+            uploads.push({
+              filename: part.filename ?? "upload",
+              type: part.mimetype ?? "",
+              tempPath,
+            });
+          } else if (part.fieldname) {
+            fields[part.fieldname] = String(part.value);
           }
-          const tempPath = await saveMultipartToTemp(ctx, part.file);
-          uploads.push({
-            filename: part.filename ?? "upload",
-            type: part.mimetype ?? "",
-            tempPath,
+        }
+      } catch (err) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw err;
+      }
+
+      const prompt = (fields.prompt ?? "").trim();
+      if (!prompt) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(ApiCodes.validation, "prompt is required", 400);
+      }
+
+      // Account + proxy are chosen automatically at run time: the runner
+      // prefers the default account (then the most recently successful eligible
+      // one) and picks the healthiest enabled proxy. Reject only when there is
+      // NO account at all (clearer than a runner failure later); the runner
+      // re-checks eligibility + a live verified session.
+      const title = (fields.title ?? "").trim() || null;
+      if (ctx.accounts.list().length === 0) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(
+          ApiCodes.validation,
+          "no google account is registered; add one in the admin panel first",
+          400,
+        );
+      }
+
+      if (droppedFiles > 0) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(ApiCodes.validation, `too many files (max ${MAX_SOURCES_PER_JOB})`, 400);
+      }
+
+      // Validate + hash each source. `storageName` is index-prefixed so two
+      // files with the same (or the same sanitized) name never collide.
+      const { sha256OfFile } = await import("../../domain/archive.js");
+      const sources: JobSource[] = [];
+      try {
+        for (let i = 0; i < uploads.length; i++) {
+          const up = uploads[i];
+          if (!up) continue;
+          const ext = path.extname(up.filename).toLowerCase().replace(/^\./, "");
+          if (!ctx.config.allowedSourceExtensions.includes(ext)) {
+            throw new ApiError(
+              ApiCodes.validation,
+              `unsupported file type: .${ext || "(no extension)"}`,
+              400,
+            );
+          }
+          const size = await sizeOf(up.tempPath);
+          if (size === 0) {
+            throw new ApiError(ApiCodes.validation, `file "${up.filename}" is empty`, 400);
+          }
+          if (size > ctx.config.maxUploadBytes) {
+            throw new ApiError(
+              ApiCodes.validation,
+              `file "${up.filename}" exceeds size limit`,
+              413,
+            );
+          }
+          let safe: string;
+          try {
+            safe = safeName(up.filename);
+          } catch {
+            safe = `file${ext ? `.${ext}` : ""}`;
+          }
+          sources.push({
+            originalName: up.filename,
+            storageName: `${i + 1}-${safe}`,
+            mediaType: up.type || EXT_MEDIA[ext] || "application/octet-stream",
+            size,
+            sha256: sha256OfFile(up.tempPath),
+            // The extension list IS NotebookLM's official supported set, so any
+            // accepted file is provider-confirmed by definition.
+            providerConfirmed: true,
           });
-        } else if (part.fieldname) {
-          fields[part.fieldname] = String(part.value);
         }
+      } catch (err) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw err;
       }
-    } catch (err) {
-      await rmAll(uploads.map((u) => u.tempPath));
-      throw err;
-    }
 
-    const prompt = (fields.prompt ?? "").trim();
-    if (!prompt) {
-      await rmAll(uploads.map((u) => u.tempPath));
-      throw new ApiError(ApiCodes.validation, "prompt is required", 400);
-    }
+      const job = ctx.jobs.create({
+        input: {
+          prompt,
+          title,
+          sources,
+          preferredAccountId: null,
+          preferredNodeId: null,
+        },
+        configSnapshot: {
+          provider: ctx.provider.name,
+          proxyRuntime: ctx.config.proxyRuntime,
+          host: ctx.config.host,
+        },
+      });
 
-    // Account + proxy are chosen automatically at run time: the runner
-    // prefers the default account (then the most recently successful eligible
-    // one) and picks the healthiest enabled proxy. Reject only when there is
-    // NO account at all (clearer than a runner failure later); the runner
-    // re-checks eligibility + a live verified session.
-    const title = (fields.title ?? "").trim() || null;
-    if (ctx.accounts.list().length === 0) {
-      await rmAll(uploads.map((u) => u.tempPath));
-      throw new ApiError(
-        ApiCodes.validation,
-        "no google account is registered; add one in the admin panel first",
-        400,
-      );
-    }
-
-    if (droppedFiles > 0) {
-      await rmAll(uploads.map((u) => u.tempPath));
-      throw new ApiError(ApiCodes.validation, `too many files (max ${MAX_SOURCES_PER_JOB})`, 400);
-    }
-
-    // Validate + hash each source. `storageName` is index-prefixed so two
-    // files with the same (or the same sanitized) name never collide.
-    const { sha256OfFile } = await import("../../domain/archive.js");
-    const sources: JobSource[] = [];
-    try {
-      for (let i = 0; i < uploads.length; i++) {
-        const up = uploads[i];
-        if (!up) continue;
-        const ext = path.extname(up.filename).toLowerCase().replace(/^\./, "");
-        if (!ctx.config.allowedSourceExtensions.includes(ext)) {
-          throw new ApiError(
-            ApiCodes.validation,
-            `unsupported file type: .${ext || "(no extension)"}`,
-            400,
-          );
-        }
-        const size = await sizeOf(up.tempPath);
-        if (size === 0) {
-          throw new ApiError(ApiCodes.validation, `file "${up.filename}" is empty`, 400);
-        }
-        if (size > ctx.config.maxUploadBytes) {
-          throw new ApiError(ApiCodes.validation, `file "${up.filename}" exceeds size limit`, 413);
-        }
-        let safe: string;
-        try {
-          safe = safeName(up.filename);
-        } catch {
-          safe = `file${ext ? `.${ext}` : ""}`;
-        }
-        sources.push({
-          originalName: up.filename,
-          storageName: `${i + 1}-${safe}`,
-          mediaType: up.type || EXT_MEDIA[ext] || "application/octet-stream",
-          size,
-          sha256: sha256OfFile(up.tempPath),
-          // The extension list IS NotebookLM's official supported set, so any
-          // accepted file is provider-confirmed by definition.
-          providerConfirmed: true,
+      // Initialize the archive and store every source under its storage name.
+      try {
+        const archive = new JobArchive(dataPaths(ctx.config.dataDir).jobsDir, job.id);
+        archive.init({
+          prompt,
+          sources: sources.map((s) => ({
+            originalName: s.originalName,
+            storageName: s.storageName,
+            mediaType: s.mediaType,
+          })),
+          configSnapshot: job.configSnapshot,
+          createdAt: job.createdAt,
         });
+        for (let i = 0; i < uploads.length; i++) {
+          const up = uploads[i];
+          const src = sources[i];
+          if (!up || !src) continue;
+          await archive.storeSource(up.tempPath, src.storageName);
+        }
+        ctx.jobs.appendEvent(job.id, "created", "job created and queued");
+      } catch {
+        // Roll back: fail the job, do not leak the raw error.
+        ctx.jobs.setStatus(job.id, "FAILED", {
+          errorClass: "invalid_input",
+          errorMessage: "archive initialization failed",
+        });
+        throw new ApiError(ApiCodes.validation, "could not store request", 400);
+      } finally {
+        // The temp uploads are copied into the archive; drop the temp copies.
+        await rmAll(uploads.map((u) => u.tempPath));
       }
-    } catch (err) {
-      await rmAll(uploads.map((u) => u.tempPath));
-      throw err;
-    }
 
-    const job = ctx.jobs.create({
-      input: {
-        prompt,
-        title,
-        sources,
-        preferredAccountId: null,
-        preferredNodeId: null,
-      },
-      configSnapshot: {
-        provider: ctx.provider.name,
-        proxyRuntime: ctx.config.proxyRuntime,
-        host: ctx.config.host,
-      },
-    });
-
-    // Initialize the archive and store every source under its storage name.
-    try {
-      const archive = new JobArchive(dataPaths(ctx.config.dataDir).jobsDir, job.id);
-      archive.init({
-        prompt,
-        sources: sources.map((s) => ({
-          originalName: s.originalName,
-          storageName: s.storageName,
-          mediaType: s.mediaType,
-        })),
-        configSnapshot: job.configSnapshot,
-        createdAt: job.createdAt,
-      });
-      for (let i = 0; i < uploads.length; i++) {
-        const up = uploads[i];
-        const src = sources[i];
-        if (!up || !src) continue;
-        await archive.storeSource(up.tempPath, src.storageName);
-      }
-      ctx.jobs.appendEvent(job.id, "created", "job created and queued");
-    } catch {
-      // Roll back: fail the job, do not leak the raw error.
-      ctx.jobs.setStatus(job.id, "FAILED", {
-        errorClass: "invalid_input",
-        errorMessage: "archive initialization failed",
-      });
-      throw new ApiError(ApiCodes.validation, "could not store request", 400);
-    } finally {
-      // The temp uploads are copied into the archive; drop the temp copies.
-      await rmAll(uploads.map((u) => u.tempPath));
-    }
-
-    return reply.code(201).send({ id: job.id, status: job.status });
-  });
+      return reply.code(201).send({ id: job.id, status: job.status });
+    },
+  );
 
   // List with filters + pagination.
-  app.get("/api/jobs", async (req) => {
-    const q = listQuery.parse(req.query);
-    const status = q.status
-      ? (q.status.split(",") as import("@nlo/shared").JobStatus[])
-      : undefined;
-    return ctx.jobs.list({
-      status,
-      accountId: q.accountId,
-      nodeId: q.nodeId,
-      search: q.search,
-      limit: q.limit,
-      offset: q.offset,
-    });
-  });
+  app.get(
+    "/api/jobs",
+    {
+      schema: {
+        summary: "List jobs (filtered, paginated)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        querystring: {
+          type: "object",
+          properties: {
+            status: { type: "string", description: "Comma-separated job statuses" },
+            accountId: { type: "string" },
+            nodeId: { type: "string" },
+            search: { type: "string", maxLength: 200 },
+            limit: { type: "integer", minimum: 1, maximum: 200 },
+            offset: { type: "integer", minimum: 0 },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            required: ["items", "total"],
+            properties: {
+              items: { type: "array", items: { $ref: "JobSummary" } },
+              total: { type: "integer" },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const q = listQuery.parse(req.query);
+      const status = q.status
+        ? (q.status.split(",") as import("@nlo/shared").JobStatus[])
+        : undefined;
+      return ctx.jobs.list({
+        status,
+        accountId: q.accountId,
+        nodeId: q.nodeId,
+        search: q.search,
+        limit: q.limit,
+        offset: q.offset,
+      });
+    },
+  );
 
-  app.get<{ Params: { id: string } }>("/api/jobs/:id", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    return job;
-  });
+  app.get<{ Params: { id: string } }>(
+    "/api/jobs/:id",
+    {
+      schema: {
+        summary: "Get a job (answerMarkdown holds the output on success)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: { 200: { $ref: "JobSummary" }, 404: { $ref: "Error" } },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      return job;
+    },
+  );
+  app.get<{ Params: { id: string } }>(
+    "/api/jobs/:id/events",
+    {
+      schema: {
+        summary: "List job events (chronological)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["id", "jobId", "at", "type", "message"],
+              properties: {
+                id: { type: "string" },
+                jobId: { type: "string" },
+                at: { type: "string" },
+                type: { type: "string" },
+                message: { type: "string" },
+                data: { type: "object", additionalProperties: true },
+              },
+            },
+          },
+          404: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      return ctx.jobs.events(job.id);
+    },
+  );
 
-  app.get<{ Params: { id: string } }>("/api/jobs/:id/events", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    return ctx.jobs.events(job.id);
-  });
+  app.get<{ Params: { id: string } }>(
+    "/api/jobs/:id/attempts",
+    {
+      schema: {
+        summary: "List job run attempts",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["attempt", "startedAt", "outcome"],
+              properties: {
+                attempt: { type: "integer" },
+                accountId: { type: ["string", "null"] },
+                nodeId: { type: ["string", "null"] },
+                startedAt: { type: "string" },
+                endedAt: { type: ["string", "null"] },
+                outcome: { type: "string" },
+                detail: { type: "object", additionalProperties: true },
+              },
+            },
+          },
+          404: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      return ctx.jobs.attempts(job.id);
+    },
+  );
 
-  app.get<{ Params: { id: string } }>("/api/jobs/:id/attempts", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    return ctx.jobs.attempts(job.id);
-  });
-
-  app.get<{ Params: { id: string } }>("/api/jobs/:id/artifacts", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    const rows = (ctx.jobs as unknown as { db: { raw: import("node:sqlite").DatabaseSync } }).db.raw
-      .prepare(
-        "SELECT id, filename, media_type, size, source, storage_key, created_at FROM artifacts WHERE job_id = ? ORDER BY id",
-      )
-      .all(job.id) as Record<string, unknown>[];
-    return rows.map((r) => ({
-      id: r.id as string,
-      filename: r.filename as string,
-      mediaType: r.media_type as string,
-      size: r.size as number,
-      source: r.source as string,
-      storageKey: r.storage_key as string,
-      createdAt: r.created_at as string,
-    }));
-  });
+  app.get<{ Params: { id: string } }>(
+    "/api/jobs/:id/artifacts",
+    {
+      schema: {
+        summary: "List job artifacts (provider-produced files)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "array",
+            items: {
+              type: "object",
+              required: [
+                "id",
+                "filename",
+                "mediaType",
+                "size",
+                "source",
+                "storageKey",
+                "createdAt",
+              ],
+              properties: {
+                id: { type: "string" },
+                filename: { type: "string" },
+                mediaType: { type: "string" },
+                size: { type: "integer" },
+                source: { type: "string" },
+                storageKey: { type: "string" },
+                createdAt: { type: "string" },
+              },
+            },
+          },
+          404: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      const rows = (
+        ctx.jobs as unknown as { db: { raw: import("node:sqlite").DatabaseSync } }
+      ).db.raw
+        .prepare(
+          "SELECT id, filename, media_type, size, source, storage_key, created_at FROM artifacts WHERE job_id = ? ORDER BY id",
+        )
+        .all(job.id) as Record<string, unknown>[];
+      return rows.map((r) => ({
+        id: r.id as string,
+        filename: r.filename as string,
+        mediaType: r.media_type as string,
+        size: r.size as number,
+        source: r.source as string,
+        storageKey: r.storage_key as string,
+        createdAt: r.created_at as string,
+      }));
+    },
+  );
 
   // Download a single artifact (safe: storage_key is server-assigned).
   app.get<{ Params: { id: string; artifactId: string } }>(
     "/api/jobs/:id/artifacts/:artifactId",
+    {
+      schema: {
+        summary: "Download a single artifact (file bytes)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description:
+          "Streams the file with its media type and Content-Disposition: attachment. " +
+          "Also reachable from loopback or with a valid admin cookie.",
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            artifactId: { type: "string" },
+          },
+        },
+        response: {
+          200: {
+            content: {
+              "application/octet-stream": {
+                schema: { type: "string", format: "binary" },
+              },
+            },
+          },
+          404: { $ref: "Error" },
+        },
+      },
+    },
     async (req, reply) => {
       const job = ctx.jobs.get(req.params.id);
       if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
@@ -302,69 +512,122 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     },
   );
 
-  app.post<{ Params: { id: string } }>("/api/jobs/:id/cancel", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    // Terminal: nothing to do.
-    if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) {
-      return { ok: true, cancelled: false, status: job.status, note: "already terminal" };
-    }
-    if (job.status === "RUNNING") {
-      // Only RUNNING requests cancel; the runner finalizes CANCELLED.
-      ctx.jobs.setStatus(job.id, "CANCEL_REQUESTED");
-      const aborted = ctx.runner.cancel(job.id);
-      return { ok: true, cancelled: aborted, status: "CANCEL_REQUESTED" };
-    }
-    // Other in-flight / pending states may go straight to CANCELLED.
-    if (
-      [
-        "CREATED",
-        "VALIDATING",
-        "QUEUED",
-        "WAITING_FOR_ACCOUNT",
-        "WAITING_FOR_PROXY",
-        "RETRY_WAIT",
-        "NEEDS_ATTENTION",
-      ].includes(job.status)
-    ) {
-      ctx.jobs.setStatus(job.id, "CANCELLED", { errorMessage: "cancelled by user" });
-      ctx.jobs.appendEvent(job.id, "cancelled", "job cancelled");
-      return { ok: true, cancelled: true, status: "CANCELLED" };
-    }
-    throw new ApiError(ApiCodes.invalidState, "job cannot be cancelled in this state", 409);
-  });
+  app.post<{ Params: { id: string } }>(
+    "/api/jobs/:id/cancel",
+    {
+      schema: {
+        summary: "Cancel a job (idempotent for terminal jobs)",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description: "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["ok", "cancelled", "status"],
+            properties: {
+              ok: { type: "boolean" },
+              cancelled: { type: "boolean" },
+              status: { type: "string" },
+              note: { type: "string" },
+            },
+          },
+          404: { $ref: "Error" },
+          409: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      // Terminal: nothing to do.
+      if (["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status)) {
+        return { ok: true, cancelled: false, status: job.status, note: "already terminal" };
+      }
+      if (job.status === "RUNNING") {
+        // Only RUNNING requests cancel; the runner finalizes CANCELLED.
+        ctx.jobs.setStatus(job.id, "CANCEL_REQUESTED");
+        const aborted = ctx.runner.cancel(job.id);
+        return { ok: true, cancelled: aborted, status: "CANCEL_REQUESTED" };
+      }
+      // Other in-flight / pending states may go straight to CANCELLED.
+      if (
+        [
+          "CREATED",
+          "VALIDATING",
+          "QUEUED",
+          "WAITING_FOR_ACCOUNT",
+          "WAITING_FOR_PROXY",
+          "RETRY_WAIT",
+          "NEEDS_ATTENTION",
+        ].includes(job.status)
+      ) {
+        ctx.jobs.setStatus(job.id, "CANCELLED", { errorMessage: "cancelled by user" });
+        ctx.jobs.appendEvent(job.id, "cancelled", "job cancelled");
+        return { ok: true, cancelled: true, status: "CANCELLED" };
+      }
+      throw new ApiError(ApiCodes.invalidState, "job cannot be cancelled in this state", 409);
+    },
+  );
 
   // Re-queue a job (operator action):
   //  - NEEDS_ATTENTION: human reconciliation (attempt budget preserved);
   //  - FAILED: explicit retry with the SAME account + inputs; the attempt
   //    budget is reset, the stale error and last node selection are cleared,
   //    and the runner re-validates the session and picks a FRESH proxy.
-  app.post<{ Params: { id: string } }>("/api/jobs/:id/requeue", async (req) => {
-    const job = ctx.jobs.get(req.params.id);
-    if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
-    if (job.status === "NEEDS_ATTENTION") {
-      ctx.jobs.setStatus(job.id, "QUEUED");
-      ctx.jobs.appendEvent(job.id, "requeued", "job requeued by operator");
-      return { ok: true, status: "QUEUED" };
-    }
-    if (job.status === "FAILED") {
-      ctx.jobs.setStatus(job.id, "QUEUED", {
-        attempt: 0,
-        progress: 0,
-        progressNote: null,
-        errorClass: null,
-        errorMessage: null,
-        nodeId: null, // force a fresh proxy selection
-      });
-      ctx.jobs.appendEvent(job.id, "retried", "job retried by operator (same account)");
-      return { ok: true, status: "QUEUED" };
-    }
-    throw new ApiError(
-      ApiCodes.invalidState,
-      "only FAILED or NEEDS_ATTENTION jobs can be requeued",
-      409,
-    );
-  });
+  app.post<{ Params: { id: string } }>(
+    "/api/jobs/:id/requeue",
+    {
+      schema: {
+        summary: "Requeue a FAILED or NEEDS_ATTENTION job",
+        tags: ["jobs"],
+        security: [{ bearerAuth: [] }],
+        description:
+          "FAILED: resets the attempt budget, clears the stale error and node selection " +
+          "(fresh proxy). NEEDS_ATTENTION: human reconciliation. " +
+          "Also reachable from loopback or with a valid admin cookie.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["ok", "status"],
+            properties: {
+              ok: { type: "boolean" },
+              status: { type: "string" },
+            },
+          },
+          404: { $ref: "Error" },
+          409: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const job = ctx.jobs.get(req.params.id);
+      if (!job) throw new ApiError(ApiCodes.notFound, "job not found", 404);
+      if (job.status === "NEEDS_ATTENTION") {
+        ctx.jobs.setStatus(job.id, "QUEUED");
+        ctx.jobs.appendEvent(job.id, "requeued", "job requeued by operator");
+        return { ok: true, status: "QUEUED" };
+      }
+      if (job.status === "FAILED") {
+        ctx.jobs.setStatus(job.id, "QUEUED", {
+          attempt: 0,
+          progress: 0,
+          progressNote: null,
+          errorClass: null,
+          errorMessage: null,
+          nodeId: null, // force a fresh proxy selection
+        });
+        ctx.jobs.appendEvent(job.id, "retried", "job retried by operator (same account)");
+        return { ok: true, status: "QUEUED" };
+      }
+      throw new ApiError(
+        ApiCodes.invalidState,
+        "only FAILED or NEEDS_ATTENTION jobs can be requeued",
+        409,
+      );
+    },
+  );
 }
 
 async function saveMultipartToTemp(

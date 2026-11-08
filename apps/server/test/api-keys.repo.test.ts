@@ -33,7 +33,7 @@ describe("ApiKeyRepo", () => {
     setup();
     const k = repo.create("a");
     expect(repo.verify(k.raw)?.name).toBe("a");
-    expect(repo.list()[0].lastUsedAt).not.toBeNull();
+    expect(repo.list()[0]!.lastUsedAt).not.toBeNull();
   });
 
   it("verify returns null for an unknown key", () => {

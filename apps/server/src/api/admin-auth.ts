@@ -114,36 +114,109 @@ function setCookieHeader(name: string, value: string, maxAgeSec: number): string
 export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void {
   const auth = ctx.adminAuth;
 
-  app.post("/api/admin/login", async (req, reply) => {
-    if (!auth.enabled) {
-      // Gate disabled: behave like a successful no-op so the UI works everywhere.
-      return { ok: true, gated: false };
-    }
-    const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
-    const username = typeof body.username === "string" ? body.username : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    // Compare the password even when the username is wrong (constant work path
-    // is not required at this strength for a loopback app; both are checked).
-    const session = username === auth.user ? auth.login(password) : null;
-    if (!session) {
-      throw new ApiError(ApiCodes.unauthorized, "نام کاربری یا رمز اشتباه است", 401);
-    }
-    const maxAgeSec = Math.floor((session.expiresMs - Date.now()) / 1000);
-    reply.header("set-cookie", setCookieHeader(COOKIE, session.token, maxAgeSec));
-    return { ok: true, gated: true };
-  });
+  app.post(
+    "/api/admin/login",
+    {
+      schema: {
+        summary: "Admin login (issues the nlo_admin session cookie)",
+        tags: ["admin"],
+        description:
+          "Username + password from NLO_ADMIN_USER / NLO_ADMIN_PASSWORD. On success sets an " +
+          "HttpOnly, SameSite=Strict `nlo_admin` cookie (12h). When the gate is disabled the " +
+          "call is a successful no-op (gated: false). Missing/missing-typed fields are a bad " +
+          "login (401), never a 400 — that is why they are optional in the schema.",
+        body: {
+          type: "object",
+          properties: {
+            username: { type: "string" },
+            password: { type: "string" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            required: ["ok", "gated"],
+            properties: {
+              ok: { type: "boolean" },
+              gated: {
+                type: "boolean",
+                description: "false when no admin credentials are configured",
+              },
+            },
+          },
+          401: { $ref: "Error" },
+        },
+      },
+    },
+    async (req, reply) => {
+      if (!auth.enabled) {
+        // Gate disabled: behave like a successful no-op so the UI works everywhere.
+        return { ok: true, gated: false };
+      }
+      const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      const username = typeof body.username === "string" ? body.username : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      // Compare the password even when the username is wrong (constant work path
+      // is not required at this strength for a loopback app; both are checked).
+      const session = username === auth.user ? auth.login(password) : null;
+      if (!session) {
+        throw new ApiError(ApiCodes.unauthorized, "نام کاربری یا رمز اشتباه است", 401);
+      }
+      const maxAgeSec = Math.floor((session.expiresMs - Date.now()) / 1000);
+      reply.header("set-cookie", setCookieHeader(COOKIE, session.token, maxAgeSec));
+      return { ok: true, gated: true };
+    },
+  );
 
-  app.post("/api/admin/logout", async (req, reply) => {
-    const token = parseCookies(req.headers.cookie)[COOKIE] ?? "";
-    auth.logout(token);
-    reply.header("set-cookie", setCookieHeader(COOKIE, "", 0));
-    return { ok: true };
-  });
+  app.post(
+    "/api/admin/logout",
+    {
+      schema: {
+        summary: "Admin logout (clears the nlo_admin cookie)",
+        tags: ["admin"],
+        description: "Clears the current session token and the cookie. No auth required.",
+        response: {
+          200: {
+            type: "object",
+            required: ["ok"],
+            properties: { ok: { type: "boolean" } },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const token = parseCookies(req.headers.cookie)[COOKIE] ?? "";
+      auth.logout(token);
+      reply.header("set-cookie", setCookieHeader(COOKIE, "", 0));
+      return { ok: true };
+    },
+  );
 
-  app.get("/api/admin/me", async (req) => {
-    const token = parseCookies(req.headers.cookie)[COOKIE] ?? "";
-    return { enabled: auth.enabled, authenticated: auth.enabled ? auth.verify(token) : true };
-  });
+  app.get(
+    "/api/admin/me",
+    {
+      schema: {
+        summary: "Admin auth state",
+        tags: ["admin"],
+        description:
+          "Whether the admin gate is enabled and the current cookie is authenticated. No auth required.",
+        response: {
+          200: {
+            type: "object",
+            required: ["enabled", "authenticated"],
+            properties: {
+              enabled: { type: "boolean", description: "Are admin credentials configured?" },
+              authenticated: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const token = parseCookies(req.headers.cookie)[COOKIE] ?? "";
+      return { enabled: auth.enabled, authenticated: auth.enabled ? auth.verify(token) : true };
+    },
+  );
 }
 
 const PROTECTED_PREFIXES = ["/api/accounts", "/api/proxies", "/api/sessions", "/api/api-keys"];

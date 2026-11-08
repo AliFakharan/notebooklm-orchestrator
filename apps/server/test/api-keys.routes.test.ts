@@ -27,7 +27,7 @@ describe("api-key management routes", () => {
     });
     expect(login.statusCode).toBe(200);
     const raw = login.headers["set-cookie"];
-    adminCookie = (Array.isArray(raw) ? raw[0] : raw)!.split(";")[0];
+    adminCookie = (Array.isArray(raw) ? raw[0] : raw)!.split(";")[0]!;
   });
 
   afterEach(async () => {

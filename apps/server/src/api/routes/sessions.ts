@@ -34,6 +34,82 @@ import {
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const PROVIDER = "python-worker";
 
+const ADMIN_SECURITY = [{ adminCookie: [] }];
+
+const sessionAccountSchema = {
+  type: ["object", "null"],
+  properties: {
+    id: { type: "string" },
+    label: { type: "string" },
+    enabled: { type: "boolean" },
+    displayEmail: { type: "string" },
+    authSecretRef: {
+      type: ["string", "null"],
+      description: "Literal 'present' or null — never the secret value",
+    },
+    authProfile: { type: ["string", "null"] },
+  },
+};
+
+const sessionViewSchema = {
+  type: "object",
+  required: ["accountId", "account", "session", "sessionUsable", "hasStoredFile"],
+  properties: {
+    accountId: { type: "string" },
+    account: sessionAccountSchema,
+    session: {
+      type: ["object", "null"],
+      additionalProperties: true,
+      description: "Session state row (state, email, lastError, …) or null",
+    },
+    sessionUsable: { type: "boolean" },
+    hasStoredFile: { type: "boolean" },
+  },
+};
+
+const verifyResultSchema = {
+  type: "object",
+  required: ["ok", "email", "detail", "mismatch", "session"],
+  properties: {
+    ok: { type: "boolean" },
+    email: { type: ["string", "null"] },
+    detail: { type: ["string", "null"] },
+    mismatch: { type: "boolean" },
+    session: { type: "object", additionalProperties: true },
+  },
+};
+
+const importResultSchema = {
+  type: "object",
+  additionalProperties: true,
+  properties: {
+    ok: { type: "boolean" },
+    email: { type: ["string", "null"] },
+    detail: { type: ["string", "null"] },
+    mismatch: { type: "boolean" },
+    session: { type: "object", additionalProperties: true },
+    note: { type: "string" },
+  },
+};
+
+const sessionVerifyOptions = {
+  schema: {
+    summary: "Verify the account's session against the real service",
+    tags: ["sessions"],
+    security: ADMIN_SECURITY,
+    description:
+      "Runs a live, tunnel-routed service check of the stored session. On success the account " +
+      "becomes AUTHENTICATED; on rejection AUTH_REQUIRED. Requires NLO_PROVIDER=python-worker.",
+    params: { type: "object", properties: { id: { type: "string" } } },
+    response: {
+      200: verifyResultSchema,
+      400: { $ref: "Error" },
+      404: { $ref: "Error" },
+      409: { $ref: "Error" },
+    },
+  },
+};
+
 export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): void {
   const worker: PythonWorkerProvider | null =
     ctx.provider instanceof PythonWorkerProvider ? ctx.provider : null;
@@ -146,22 +222,59 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     };
   }
 
-  app.get("/api/sessions", async () => {
-    const accounts = ctx.accounts.list();
-    return {
-      provider: ctx.provider.name,
-      // This app never launches a browser: accounts authenticate by pasting
-      // cookies copied from the user's own browser (see /import).
-      interactiveLogin: false,
-      sessions: accounts.map((a) => sessionView(a.id)),
-    };
-  });
+  app.get(
+    "/api/sessions",
+    {
+      schema: {
+        summary: "List auth sessions (one per account)",
+        tags: ["sessions"],
+        security: ADMIN_SECURITY,
+        description:
+          "One session view per account. This app never launches a browser: accounts " +
+          "authenticate by pasting cookies copied from the user's own browser (see /import).",
+        response: {
+          200: {
+            type: "object",
+            required: ["provider", "interactiveLogin", "sessions"],
+            properties: {
+              provider: { type: "string" },
+              interactiveLogin: { type: "boolean", example: false },
+              sessions: { type: "array", items: sessionViewSchema },
+            },
+          },
+        },
+      },
+    },
+    async () => {
+      const accounts = ctx.accounts.list();
+      return {
+        provider: ctx.provider.name,
+        // This app never launches a browser: accounts authenticate by pasting
+        // cookies copied from the user's own browser (see /import).
+        interactiveLogin: false,
+        sessions: accounts.map((a) => sessionView(a.id)),
+      };
+    },
+  );
 
-  app.get<{ Params: { id: string } }>("/api/sessions/:id", async (req) => {
-    const acct = ctx.accounts.get(req.params.id);
-    if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
-    return sessionView(acct.id);
-  });
+  app.get<{ Params: { id: string } }>(
+    "/api/sessions/:id",
+    {
+      schema: {
+        summary: "Get one account's auth session",
+        tags: ["sessions"],
+        security: ADMIN_SECURITY,
+        description: "The auth session view for a single account.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: { 200: sessionViewSchema, 404: { $ref: "Error" } },
+      },
+    },
+    async (req) => {
+      const acct = ctx.accounts.get(req.params.id);
+      if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
+      return sessionView(acct.id);
+    },
+  );
 
   // --- paste-import (the only auth path) ------------------------------------
   // Re-import must be possible from ANY state (including AUTHENTICATED): the
@@ -221,9 +334,17 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       throw new ApiError(ApiCodes.conflict, `verification failed: ${msg}`, 409);
     }
   };
-  app.post<{ Params: { id: string } }>("/api/sessions/:id/verify", verifyHandler);
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/verify",
+    sessionVerifyOptions,
+    verifyHandler,
+  );
   // refresh is semantically the same check (the service decides)
-  app.post<{ Params: { id: string } }>("/api/sessions/:id/refresh", verifyHandler);
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/refresh",
+    sessionVerifyOptions,
+    verifyHandler,
+  );
 
   // --- import: paste cookies from your own browser (the only auth path) -------
   // Accepted input (auto-detected, in order):
@@ -251,94 +372,152 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       "provide cookies, base64, or serverPath",
     );
 
-  app.post<{ Params: { id: string } }>("/api/sessions/:id/import", async (req) => {
-    const w = requireWorker();
-    const acct = ctx.accounts.getOrThrow(req.params.id);
-    const body = importBody.parse(req.body);
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/import",
+    {
+      schema: {
+        summary: "Import session cookies (the only auth path)",
+        tags: ["sessions"],
+        security: ADMIN_SECURITY,
+        description:
+          "Paste cookies copied from your own browser after signing into notebooklm. " +
+          "Auto-detects Playwright storage state, a JSON cookie array, or Netscape cookies.txt; " +
+          "filters to google.com cookies, writes them 0600, and verifies against the REAL " +
+          "service before the account may be used. Provide one of cookies, base64, or serverPath.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        body: {
+          type: "object",
+          description: "Provide one of cookies, base64, or serverPath.",
+          properties: {
+            cookies: {
+              type: "string",
+              description: "Raw cookie text (storage state / JSON array / Netscape cookies.txt)",
+            },
+            base64: { type: "string", description: "base64 of the raw cookie text" },
+            serverPath: {
+              type: "string",
+              description: "Path on the server (operator convenience)",
+            },
+          },
+        },
+        response: {
+          200: importResultSchema,
+          400: { $ref: "Error" },
+          404: { $ref: "Error" },
+          409: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const w = requireWorker();
+      const acct = ctx.accounts.getOrThrow(req.params.id);
+      const body = importBody.parse(req.body);
 
-    // --- extract the raw text ------------------------------------------------
-    let text: string;
-    if (body.cookies !== undefined) {
-      text = body.cookies;
-    } else if (body.base64 !== undefined) {
-      const raw = Buffer.from(body.base64, "base64");
-      if (raw.byteLength > MAX_IMPORT_BYTES) {
-        throw new ApiError(ApiCodes.validation, "cookie input too large (max 2 MiB)", 400);
+      // --- extract the raw text ------------------------------------------------
+      let text: string;
+      if (body.cookies !== undefined) {
+        text = body.cookies;
+      } else if (body.base64 !== undefined) {
+        const raw = Buffer.from(body.base64, "base64");
+        if (raw.byteLength > MAX_IMPORT_BYTES) {
+          throw new ApiError(ApiCodes.validation, "cookie input too large (max 2 MiB)", 400);
+        }
+        text = raw.toString("utf8");
+      } else {
+        // serverPath: operator-only convenience (file on THIS machine, size-checked).
+        const p = path.resolve(body.serverPath!);
+        const st = statSync(p);
+        if (!st.isFile() || st.size > MAX_IMPORT_BYTES) {
+          throw new ApiError(
+            ApiCodes.validation,
+            "serverPath is not a readable file (or too large)",
+            400,
+          );
+        }
+        text = (await readFile(p)).toString("utf8");
       }
-      text = raw.toString("utf8");
-    } else {
-      // serverPath: operator-only convenience (file on THIS machine, size-checked).
-      const p = path.resolve(body.serverPath!);
-      const st = statSync(p);
-      if (!st.isFile() || st.size > MAX_IMPORT_BYTES) {
-        throw new ApiError(
-          ApiCodes.validation,
-          "serverPath is not a readable file (or too large)",
-          400,
-        );
-      }
-      text = (await readFile(p)).toString("utf8");
-    }
 
-    // --- parse + filter BEFORE touching the destination ----------------------
-    let parsed;
-    try {
-      parsed = parsePastedCookies(text);
-    } catch (e) {
-      const msg = e instanceof CookieImportError ? e.message : "unrecognized cookie format";
-      throw new ApiError(ApiCodes.validation, msg, 400);
-    }
-    const stateJson = toStorageState(parsed);
-
-    const dest = w.sessionPathFor(acct.id);
-    await mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
-    await writeFile(dest, stateJson);
-    await chmod(dest, 0o600);
-
-    // --- the service's verdict decides the state ------------------------------
-    // verifyAccount performs its own transitions from AUTH_IN_PROGRESS:
-    //  success  -> AUTHENTICATED (+ account identity sync)
-    //  rejected -> AUTH_REQUIRED (session.lastError carries the reason)
-    canEnterAuth(acct.id);
-    try {
-      let r: Awaited<ReturnType<typeof verifyAccount>>;
+      // --- parse + filter BEFORE touching the destination ----------------------
+      let parsed;
       try {
-        r = await verifyAccount(w, acct.id);
+        parsed = parsePastedCookies(text);
       } catch (e) {
-        // The provider surfaced a HARD error while the service checked the
-        // imported session (e.g. notebooklm-py rejected the cookie set:
-        // "missing required cookies"). That is a rejected import, not a
-        // server fault: keep the stored file, return to AUTH_REQUIRED with
-        // the reason, and report a clean 409 (never a 500).
-        const msg = e instanceof Error ? e.message : String(e);
-        recordAuthFailure(acct.id, msg);
-        throw new ApiError(ApiCodes.conflict, `imported session rejected: ${msg}`, 409);
+        const msg = e instanceof CookieImportError ? e.message : "unrecognized cookie format";
+        throw new ApiError(ApiCodes.validation, msg, 400);
       }
-      if (!r.ok) {
-        return { ...r, note: "file stored, but the service rejected it" };
+      const stateJson = toStorageState(parsed);
+
+      const dest = w.sessionPathFor(acct.id);
+      await mkdir(path.dirname(dest), { recursive: true, mode: 0o700 });
+      await writeFile(dest, stateJson);
+      await chmod(dest, 0o600);
+
+      // --- the service's verdict decides the state ------------------------------
+      // verifyAccount performs its own transitions from AUTH_IN_PROGRESS:
+      //  success  -> AUTHENTICATED (+ account identity sync)
+      //  rejected -> AUTH_REQUIRED (session.lastError carries the reason)
+      canEnterAuth(acct.id);
+      try {
+        let r: Awaited<ReturnType<typeof verifyAccount>>;
+        try {
+          r = await verifyAccount(w, acct.id);
+        } catch (e) {
+          // The provider surfaced a HARD error while the service checked the
+          // imported session (e.g. notebooklm-py rejected the cookie set:
+          // "missing required cookies"). That is a rejected import, not a
+          // server fault: keep the stored file, return to AUTH_REQUIRED with
+          // the reason, and report a clean 409 (never a 500).
+          const msg = e instanceof Error ? e.message : String(e);
+          recordAuthFailure(acct.id, msg);
+          throw new ApiError(ApiCodes.conflict, `imported session rejected: ${msg}`, 409);
+        }
+        if (!r.ok) {
+          return { ...r, note: "file stored, but the service rejected it" };
+        }
+        if (r.mismatch) {
+          // Verified, but the identity is someone else: never green.
+          ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", {
+            lastError: r.detail ?? "identity mismatch",
+          });
+          throw new ApiError(ApiCodes.conflict, r.detail ?? "identity mismatch", 409);
+        }
+        return r;
+      } finally {
+        leaveAuth(acct.id);
       }
-      if (r.mismatch) {
-        // Verified, but the identity is someone else: never green.
-        ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", {
-          lastError: r.detail ?? "identity mismatch",
-        });
-        throw new ApiError(ApiCodes.conflict, r.detail ?? "identity mismatch", 409);
-      }
-      return r;
-    } finally {
-      leaveAuth(acct.id);
-    }
-  });
+    },
+  );
 
   // --- logout ----------------------------------------------------------------
-  app.delete<{ Params: { id: string } }>("/api/sessions/:id", async (req) => {
-    const w = requireWorker();
-    const acct = ctx.accounts.getOrThrow(req.params.id);
-    ctx.sessions.delete(acct.id, PROVIDER);
-    const f = w.sessionPathFor(acct.id);
-    if (existsSync(f)) {
-      await unlink(f).catch(() => {});
-    }
-    return { ok: true };
-  });
+  app.delete<{ Params: { id: string } }>(
+    "/api/sessions/:id",
+    {
+      schema: {
+        summary: "Log out / delete an account's stored session",
+        tags: ["sessions"],
+        security: ADMIN_SECURITY,
+        description: "Removes the session row and the 0600 storage-state file.",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["ok"],
+            properties: { ok: { type: "boolean" } },
+          },
+          400: { $ref: "Error" },
+          404: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const w = requireWorker();
+      const acct = ctx.accounts.getOrThrow(req.params.id);
+      ctx.sessions.delete(acct.id, PROVIDER);
+      const f = w.sessionPathFor(acct.id);
+      if (existsSync(f)) {
+        await unlink(f).catch(() => {});
+      }
+      return { ok: true };
+    },
+  );
 }

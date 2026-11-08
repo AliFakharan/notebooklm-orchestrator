@@ -83,7 +83,7 @@ describe("job-surface gate", () => {
       headers: { authorization: `Bearer ${k.raw}` },
     });
     expect(res.statusCode).toBe(200);
-    expect(ctx.apiKeys.list()[0].lastUsedAt).not.toBeNull();
+    expect(ctx.apiKeys.list()[0]!.lastUsedAt).not.toBeNull();
   });
 
   it("rejects a wrong key and a revoked key", async () => {
