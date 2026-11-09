@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { PlusCircle, Radio } from "lucide-react";
 import type { JobStatus } from "@nlo/shared";
 import { jobsList } from "@/lib/api";
-import { fa, faFileSize } from "@/lib/utils";
+import { fa } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Stat } from "@/components/ui/stat";
 import { Button } from "@/components/ui/button";
@@ -87,7 +87,7 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {loading || !data ? (
           Array.from({ length: 2 }).map((_, i) => <StatSkeleton key={i} />)
         ) : (
@@ -101,8 +101,8 @@ export function DashboardPage() {
       {error && <ErrorBanner message={error} onRetry={() => void load()} />}
 
       <div className="grid gap-4">
-        <Card className="xl:col-span-2">
-          <CardHeader className="flex-row items-center justify-between">
+        <Card className="min-w-0 xl:col-span-2">
+          <CardHeader className="items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle>درخواست‌های اخیر</CardTitle>
             </div>
@@ -148,7 +148,7 @@ export function DashboardPage() {
                   <TableRow>
                     <TableHead>درخواست</TableHead>
                     <TableHead>وضعیت</TableHead>
-                    <TableHead>پیشرفت</TableHead>
+                    <TableHead className="hidden sm:table-cell">پیشرفت</TableHead>
                     <TableHead>تاریخ</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -171,7 +171,7 @@ export function DashboardPage() {
                       <TableCell>
                         <JobStatusBadge status={job.status} />
                       </TableCell>
-                      <TableCell numeric className="text-xs text-muted-foreground">
+                      <TableCell numeric className="hidden text-xs text-muted-foreground sm:table-cell">
                         {job.progress > 0 ? fa(job.progress) + "٪" : "—"}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
@@ -189,7 +189,7 @@ export function DashboardPage() {
       {data && stats && (stats.succeeded > 0 || stats.failed > 0) && (
         <p className="text-xs text-muted-foreground">
           در {fa(data.items.length)} مورد اخیر: {fa(stats.succeeded)} موفق، {fa(stats.failed)}{" "}
-          ناموفق. حجم فایل‌های بارگذاری‌شده تا سقف {faFileSize(200 * 1024 * 1024)}.
+          ناموفق.
         </p>
       )}
     </div>

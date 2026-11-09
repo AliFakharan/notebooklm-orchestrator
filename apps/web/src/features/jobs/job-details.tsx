@@ -127,7 +127,6 @@ export function JobDetailsPage() {
               <span title="تلاش‌های خودکار رانر (بدون دخالت شما)؛ با «بازتلاش» این شمارش از نو شروع می‌شود">
                 تلاش خودکار: {fa(job.attempt)} از {fa(job.maxAttempts)}
               </span>
-              {job.nodeId && <span dir="ltr">node: {job.nodeId.slice(0, 8)}</span>}
             </div>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-2">
@@ -176,9 +175,7 @@ export function JobDetailsPage() {
         </CardContent>
       </Card>
 
-      <div className="mt-2">
-        <AnswerPanel job={job} />
-      </div>
+      <AnswerPanel job={job} />
 
       <p className="text-xs text-muted-foreground">
         <Link to="/jobs" className="hover:underline">
@@ -196,14 +193,13 @@ function AnswerPanel({ job }: { job: Job }) {
   if (!job.answerMarkdown) {
     return (
       <Card>
-        <CardContent className="p-6 text-sm text-muted-foreground">
+        <div className="p-6 text-sm text-muted-foreground">
           هنوز پاسخی ثبت نشده است.{" "}
           {job.status === "SUCCEEDED" ? "" : "پس از پایان با موفقیت، پاسخ اینجا نمایش داده می‌شود."}
-        </CardContent>
+        </div>
       </Card>
     );
   }
-  const prov = job.resultProvenance ?? "unknown";
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(job.answerMarkdown ?? "");
@@ -219,9 +215,6 @@ function AnswerPanel({ job }: { job: Job }) {
         <div className="flex items-center justify-between gap-2">
           <CardTitle>پاسخ</CardTitle>
           <div className="flex items-center gap-2">
-            {prov === "real" && <Badge variant="success">منبع: سرویس واقعی</Badge>}
-            {prov === "mock" && <Badge variant="secondary">منبع: شبیه‌ساز (mock)</Badge>}
-            {prov === "unknown" && <Badge variant="warning">منبع: نامشخص</Badge>}
             <Button
               variant="ghost"
               size="sm"
@@ -244,17 +237,6 @@ function AnswerPanel({ job }: { job: Job }) {
         <div className="answer-md max-h-120 overflow-auto rounded-field border-line border-border bg-field p-4 text-sm leading-7">
           <ReactMarkdown>{job.answerMarkdown}</ReactMarkdown>
         </div>
-        {job.resultProviderMeta && (
-          <details className="mt-3 text-xs text-muted-foreground">
-            <summary className="cursor-pointer hover:text-foreground">جزئیات ارائه‌دهنده</summary>
-            <pre
-              className="mt-2 overflow-auto rounded-field border-line border-border bg-field p-3"
-              dir="ltr"
-            >
-              {JSON.stringify(job.resultProviderMeta, null, 2)}
-            </pre>
-          </details>
-        )}
       </CardContent>
     </Card>
   );

@@ -110,9 +110,9 @@ export function AdminApiKeysPage() {
           <div>
             <CardTitle>کلیدهای API</CardTitle>
             <CardDescription>
-              کلیدها برای دسترسی برنامه‌های دیگر (مثلاً litellm) به سطح درخواست‌ها ساخته می‌شوند.{" "}
+              کلیدها برای دسترسی برنامه‌های دیگر به سطح درخواست‌ها ساخته می‌شوند.{" "}
               <a
-                href="/documentation"
+                href={`${__NLO_BACKEND_URL__}/documentation`}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1 text-brand underline-offset-4 hover:underline"
@@ -130,18 +130,12 @@ export function AdminApiKeysPage() {
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <form onSubmit={(e) => void doCreate(e)} className="flex flex-row items-end gap-2">
-          <Field
-            label="نام کلید"
-            htmlFor="apikey-name"
-            hint="مثلاً: litellm"
-            className="min-w-40 flex-1"
-          >
+          <Field label="نام کلید" htmlFor="apikey-name" className="min-w-40 flex-1">
             <Input
               id="apikey-name"
               dir="ltr"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="litellm"
               maxLength={64}
               disabled={creating}
             />

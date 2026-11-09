@@ -138,7 +138,6 @@ export function JobHistoryPage() {
                   <TableHead>وضعیت</TableHead>
                   <TableHead>پیشرفت</TableHead>
                   <TableHead>تلاش</TableHead>
-                  <TableHead>بازگشت</TableHead>
                   <TableHead>به‌روزرسانی</TableHead>
                 </TableRow>
               </TableHeader>
@@ -172,9 +171,6 @@ export function JobHistoryPage() {
                     </TableCell>
                     <TableCell numeric className="text-xs text-muted-foreground">
                       {fa(job.attempt)}/{fa(job.maxAttempts)}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground" dir="ltr">
-                      {job.nodeId ? job.nodeId.slice(0, 8) : "—"}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       <RelativeTime iso={job.updatedAt} />

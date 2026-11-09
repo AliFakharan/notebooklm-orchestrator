@@ -13,7 +13,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 
 /** 100 MB per file — NotebookLM's per-source limit (mirrored server-side). */
@@ -143,7 +142,7 @@ export function CreateJobPage() {
 
             <div className="flex flex-col gap-1.5">
               <span className="text-sm font-medium text-foreground/90">
-                فایل‌ها (اختیاری، تا {fa(files.length)} از {fa(MAX_SOURCES_PER_JOB)})
+                 فایل‌ها (اختیاری، {fa(files.length)} از {fa(MAX_SOURCES_PER_JOB)})
               </span>
               {files.length > 0 && (
                 <ul className="flex flex-col gap-1.5">
@@ -228,9 +227,6 @@ export function CreateJobPage() {
                   انصراف
                 </Button>
               </Link>
-              <Badge variant="secondary" className="ms-auto">
-                پردازش روی سرور، نه در مرورگر
-              </Badge>
             </div>
           </form>
         </CardContent>
