@@ -11,6 +11,7 @@ import {
   parsePastedCookies,
   toStorageState,
 } from "../../domain/cookie-import.js";
+import { VERIFY_PROVIDER, verifySession } from "../../auth/verify-service.js";
 
 /**
  * Auth session routes: REAL cookie-paste import / verify / logout for the
@@ -32,7 +33,6 @@ import {
  */
 
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
-const PROVIDER = "python-worker";
 
 const ADMIN_SECURITY = [{ adminCookie: [] }];
 
@@ -125,52 +125,13 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     return worker;
   };
 
-  // One auth operation at a time per account: concurrent login/import would
-  // race on the same 0600 session file. The state (AUTH_IN_PROGRESS) plus
-  // this in-memory set give the UI a reliable "still running" signal.
-  const inFlight = new Set<string>();
-  const enterAuth = (accountId: string): void => {
-    if (inFlight.has(accountId)) {
-      throw new ApiError(ApiCodes.conflict, "an authentication operation is already running", 409);
-    }
-    inFlight.add(accountId);
-  };
-  const leaveAuth = (accountId: string): void => {
-    inFlight.delete(accountId);
-  };
-
-  /** Keep the account row in sync after a service-verified session. */
-  function syncAccountIdentity(accountId: string, email: string | null): void {
-    const acct = ctx.accounts.get(accountId);
-    if (!acct || !email) return;
-    if (acct.displayEmail !== email) {
-      ctx.accounts.update(accountId, { displayEmail: email });
-    }
-    // A verified login clears a stale AUTH_REQUIRED flag set by an earlier
-    // failed job — the fresh service verification is stronger evidence.
-    // DISABLED (manual) always wins and is never overridden here.
-    if (acct.status === "AUTH_REQUIRED" || acct.status === "UNKNOWN") {
-      ctx.accounts.update(accountId, { status: "ACTIVE" });
-    }
-    ctx.accounts.update(accountId, { lastVerifiedAt: new Date().toISOString() });
-  }
-
-  /**
-   * Enforce "never associate a session with the wrong account": when the
-   * account row carries an expected email and the service-verified identity
-   * differs, the session is rejected as SESSION_INVALID with a clear error.
-   * Returns the mismatch message, or null when there is no mismatch.
-   */
-  function mismatchFor(accountId: string, verifiedEmail: string | null): string | null {
-    const acct = ctx.accounts.get(accountId);
-    if (!acct || !acct.displayEmail || !verifiedEmail) return null;
-    if (acct.displayEmail.trim().toLowerCase() === verifiedEmail.trim().toLowerCase()) return null;
-    return `identity mismatch: session belongs to ${verifiedEmail}, but this account is for ${acct.displayEmail}`;
-  }
+  // One auth operation at a time per account is enforced by ctx.authGuard
+  // (shared with the background session keeper): concurrent login/import/
+  // verify would race on the same 0600 session file.
 
   function sessionView(accountId: string) {
     const acct = ctx.accounts.get(accountId);
-    const session = ctx.sessions.get(accountId, PROVIDER);
+    const session = ctx.sessions.get(accountId, VERIFY_PROVIDER);
     return {
       accountId,
       account: acct
@@ -186,39 +147,6 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       session: session ?? null,
       sessionUsable: ctx.sessions.isUsable(session),
       hasStoredFile: worker !== null && existsSync(worker.sessionPathFor(accountId)),
-    };
-  }
-
-  async function verifyAccount(w: PythonWorkerProvider, accountId: string) {
-    const acct = ctx.accounts.getOrThrow(accountId);
-    ctx.sessions.ensure(accountId, PROVIDER, acct.authProfile ?? "default");
-    const status = await w.getAccountStatus(accountId, "session");
-    // AUTH_REQUIRED is reachable from every state (it is also a valid
-    // self-update), so a single target suffices.
-    if (status.ok) {
-      const session = ctx.sessions.transition(accountId, PROVIDER, "AUTHENTICATED", {
-        email: status.email,
-        verified: true,
-      });
-      syncAccountIdentity(accountId, status.email);
-      const mismatch = mismatchFor(accountId, status.email);
-      return {
-        ok: true as const,
-        email: status.email,
-        detail: mismatch ? `verified, but: ${mismatch}` : status.detail,
-        mismatch: mismatch !== null,
-        session,
-      };
-    }
-    const session = ctx.sessions.transition(accountId, PROVIDER, "AUTH_REQUIRED", {
-      lastError: status.detail ?? "session rejected by service",
-    });
-    return {
-      ok: false as const,
-      email: null as string | null,
-      detail: status.detail,
-      mismatch: false,
-      session,
     };
   }
 
@@ -284,12 +212,12 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
   const canEnterAuth = (accountId: string): void => {
     ctx.sessions.ensure(
       accountId,
-      PROVIDER,
+      VERIFY_PROVIDER,
       ctx.accounts.getOrThrow(accountId).authProfile ?? "default",
     );
-    const cur = ctx.sessions.get(accountId, PROVIDER)!;
+    const cur = ctx.sessions.get(accountId, VERIFY_PROVIDER)!;
     if (cur.state === "AUTH_IN_PROGRESS") {
-      if (inFlight.has(accountId)) {
+      if (ctx.authGuard.running(accountId)) {
         throw new ApiError(
           ApiCodes.conflict,
           "authentication is already running for this account",
@@ -300,17 +228,17 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     } else if (cur.state === "DISABLED") {
       throw new ApiError(ApiCodes.validation, `cannot start auth from state ${cur.state}`, 409);
     }
-    enterAuth(accountId);
-    ctx.sessions.transition(accountId, PROVIDER, "AUTH_IN_PROGRESS", {});
+    ctx.authGuard.enter(accountId);
+    ctx.sessions.transition(accountId, VERIFY_PROVIDER, "AUTH_IN_PROGRESS", {});
   };
 
   /** Record a failed auth op back onto the session row (defensive: never
    *  throws — a state bookkeeping issue must not mask the original error). */
   const recordAuthFailure = (accountId: string, lastError: string): void => {
     try {
-      const cur = ctx.sessions.get(accountId, PROVIDER);
+      const cur = ctx.sessions.get(accountId, VERIFY_PROVIDER);
       if (cur && cur.state !== "AUTH_REQUIRED") {
-        ctx.sessions.transition(accountId, PROVIDER, "AUTH_REQUIRED", { lastError });
+        ctx.sessions.transition(accountId, VERIFY_PROVIDER, "AUTH_REQUIRED", { lastError });
       }
     } catch {
       /* bookkeeping only */
@@ -318,20 +246,26 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
   };
 
   // --- verify against the real service --------------------------------------
+  // Shares ctx.authGuard with the background keeper and the import path so a
+  // verify never races a concurrent import/keeper poke on the same file.
   const verifyHandler = async (
     req: FastifyRequest<{ Params: { id: string } }>,
     _reply: FastifyReply,
   ) => {
-    const w = requireWorker();
+    requireWorker();
     const acct = ctx.accounts.getOrThrow(req.params.id);
+    // enter() throws a clean 409 on a true conflict (keeper/import in flight).
+    ctx.authGuard.enter(acct.id);
     try {
-      return await verifyAccount(w, acct.id);
+      return await verifySession(ctx, acct.id);
     } catch (e) {
       // A hard provider error during a live check (worker down, package
       // hard-fail) is a client-visible check failure, not a 500.
       const msg = e instanceof Error ? e.message : String(e);
       recordAuthFailure(acct.id, msg);
       throw new ApiError(ApiCodes.conflict, `verification failed: ${msg}`, 409);
+    } finally {
+      ctx.authGuard.leave(acct.id);
     }
   };
   app.post<{ Params: { id: string } }>(
@@ -453,14 +387,14 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       await chmod(dest, 0o600);
 
       // --- the service's verdict decides the state ------------------------------
-      // verifyAccount performs its own transitions from AUTH_IN_PROGRESS:
+      // verifySession performs its own transitions from AUTH_IN_PROGRESS:
       //  success  -> AUTHENTICATED (+ account identity sync)
       //  rejected -> AUTH_REQUIRED (session.lastError carries the reason)
       canEnterAuth(acct.id);
       try {
-        let r: Awaited<ReturnType<typeof verifyAccount>>;
+        let r: Awaited<ReturnType<typeof verifySession>>;
         try {
-          r = await verifyAccount(w, acct.id);
+          r = await verifySession(ctx, acct.id);
         } catch (e) {
           // The provider surfaced a HARD error while the service checked the
           // imported session (e.g. notebooklm-py rejected the cookie set:
@@ -476,14 +410,14 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
         }
         if (r.mismatch) {
           // Verified, but the identity is someone else: never green.
-          ctx.sessions.transition(acct.id, PROVIDER, "SESSION_INVALID", {
+          ctx.sessions.transition(acct.id, VERIFY_PROVIDER, "SESSION_INVALID", {
             lastError: r.detail ?? "identity mismatch",
           });
           throw new ApiError(ApiCodes.conflict, r.detail ?? "identity mismatch", 409);
         }
         return r;
       } finally {
-        leaveAuth(acct.id);
+        ctx.authGuard.leave(acct.id);
       }
     },
   );
@@ -512,7 +446,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     async (req) => {
       const w = requireWorker();
       const acct = ctx.accounts.getOrThrow(req.params.id);
-      ctx.sessions.delete(acct.id, PROVIDER);
+      ctx.sessions.delete(acct.id, VERIFY_PROVIDER);
       const f = w.sessionPathFor(acct.id);
       if (existsSync(f)) {
         await unlink(f).catch(() => {});

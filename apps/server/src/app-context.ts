@@ -6,6 +6,7 @@ import { ApiKeyRepo } from "./domain/api-keys.repo.js";
 import { AuthSessionsRepo } from "./domain/auth-sessions.repo.js";
 import { JobsRepo } from "./domain/jobs.repo.js";
 import { ProxiesRepo } from "./domain/proxies.repo.js";
+import { SessionChecksRepo } from "./domain/session-checks.repo.js";
 import { SecretVault } from "./secrets/vault.js";
 import { MockProvider } from "./providers/mock-provider.js";
 import { PythonWorkerProvider } from "./providers/python-worker/python-worker-provider.js";
@@ -17,6 +18,9 @@ import { fetchThroughTunnel } from "./proxy/connect-proxy.js";
 import { JobRunner } from "./queue/job-runner.js";
 import { Queue } from "./queue/queue.js";
 import { createAdminAuth, type AdminAuth } from "./api/admin-auth.js";
+import { AuthGuardImpl, type AuthGuard } from "./auth/auth-guard.js";
+import { BaleNotifier } from "./notify/bale.js";
+import { SessionKeeper } from "./session-keeper/keeper.js";
 
 /**
  * AppContext: composes all services from configuration.
@@ -28,6 +32,8 @@ export interface AppContext {
   vault: SecretVault;
   accounts: AccountsRepo;
   sessions: AuthSessionsRepo;
+  /** Rolling history of background session-keeper checks. */
+  sessionChecks: SessionChecksRepo;
   proxies: ProxiesRepo;
   jobs: JobsRepo;
   provider: NotebookLMProvider;
@@ -36,6 +42,18 @@ export interface AppContext {
   proxyManager: ProxyManager;
   runner: JobRunner;
   queue: Queue;
+  /**
+   * Shared one-at-a-time auth lock per account. Used by the sessions routes
+   * (import/verify) AND the background session keeper so they never race on
+   * the same 0600 session file.
+   */
+  authGuard: AuthGuard;
+  /**
+   * Background session keeper. Null when the keeper is disabled (mock
+   * provider or NLO_SESSION_KEEPALIVE_MS=0). Stopped before the queue on
+   * close.
+   */
+  keeper: SessionKeeper | null;
   /** Admin gate for the infrastructure API (disabled unless env credentials set). */
   adminAuth: AdminAuth;
   /** API keys for machine-to-machine access to the job surface. */
@@ -43,7 +61,20 @@ export interface AppContext {
   close(): Promise<void>;
 }
 
-export function createAppContext(config: AppConfig = loadConfig()): AppContext {
+export interface CreateAppContextOptions {
+  /**
+   * Start the background session keeper. Default true (long-running server).
+   * A one-shot operator command (e.g. check:sessions) passes false: it runs
+   * its own verify and would otherwise double-verify and, on close, race its
+   * own keeper cycle against the DB.
+   */
+  startKeeper?: boolean;
+}
+
+export function createAppContext(
+  config: AppConfig = loadConfig(),
+  opts: CreateAppContextOptions = {},
+): AppContext {
   const paths = dataPaths(config.dataDir);
   for (const dir of [paths.jobsDir, paths.vaultDir, paths.tempDir]) {
     mkdirSync(dir, { recursive: true });
@@ -53,9 +84,13 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
   const vault = SecretVault.open(db, { keyHex: config.vaultKey, keyFile: paths.vaultKeyFile });
   const accounts = new AccountsRepo(db);
   const sessions = new AuthSessionsRepo(db);
+  const sessionChecks = new SessionChecksRepo(db);
   const apiKeys = new ApiKeyRepo(db);
   const proxies = new ProxiesRepo(db);
   const jobs = new JobsRepo(db);
+
+  // One shared auth lock per account (import/verify/keeper serialize on it).
+  const authGuard = new AuthGuardImpl();
 
   mkdirSync(paths.sessionsDir, { recursive: true, mode: 0o700 });
   mkdirSync(paths.vendorDir, { recursive: true });
@@ -160,12 +195,42 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
 
   queue.start();
 
+  // Background session keeper: re-verifies (and rotates) AUTHENTICATED
+  // sessions so the 10-minute "usable" window stays satisfied. Real provider
+  // only, and only when the interval is enabled (> 0). Started after the
+  // queue so a fresh boot doesn't starve job selection.
+  let keeper: SessionKeeper | null = null;
+  const startKeeper = opts.startKeeper ?? true;
+  if (startKeeper && config.provider === "python-worker" && config.sessionKeepaliveMs > 0) {
+    const notifier = new BaleNotifier({
+      botToken: config.bale.botToken,
+      chatId: config.bale.chatId,
+      log: (msg) => console.log(`[nlo:bale] ${msg}`),
+    });
+    keeper = new SessionKeeper({
+      intervalMs: config.sessionKeepaliveMs,
+      accounts,
+      sessions,
+      provider,
+      authGuard,
+      checks: sessionChecks,
+      notifier,
+      log: (msg) => console.log(`[nlo:keeper] ${msg}`),
+    });
+    keeper.start();
+  } else {
+    console.log(
+      `[nlo] session keeper disabled (startKeeper=${startKeeper}, provider=${config.provider}, keepalive=${config.sessionKeepaliveMs}ms)`,
+    );
+  }
+
   return {
     config,
     db,
     vault,
     accounts,
     sessions,
+    sessionChecks,
     proxies,
     jobs,
     provider,
@@ -174,9 +239,14 @@ export function createAppContext(config: AppConfig = loadConfig()): AppContext {
     proxyManager,
     runner,
     queue,
+    authGuard,
+    keeper,
     adminAuth: createAdminAuth(config),
     apiKeys,
     close: async () => {
+      // Stop the keeper first and DRAIN any in-flight verify so we never
+      // close the DB (or the worker/tunnel) while a cycle is mid-write.
+      await keeper?.stop();
       await queue.stop();
       (provider as { dispose?: () => void }).dispose?.();
       await (runtime as { close?: () => Promise<void> }).close?.();

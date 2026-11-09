@@ -40,6 +40,21 @@ export interface AppConfig {
   jobTimeoutMs: number;
   /** Development only: allow live jobs without a proxy tunnel. */
   allowDirectEgress: boolean;
+  /**
+   * Session-keeper poke interval (ms). The background loop re-verifies (and
+   * thereby rotates) each AUTHENTICATED session this often, keeping the
+   * 10-minute "usable" window satisfied while the server runs. `0` disables
+   * the keeper entirely. Default 300000 (5 min) — conservative to avoid
+   * Google rate limits; do not go below ~60000 in practice.
+   */
+  sessionKeepaliveMs: number;
+  /**
+   * Bale bot push notifications (expiry / recovery / infra alerts). Both
+   * values optional: when either is missing the notifier is disabled and
+   * checks still run (they just don't alert). The token is a secret and is
+   * never logged.
+   */
+  bale: { botToken: string | null; chatId: string | null };
 }
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..", "..");
@@ -162,6 +177,11 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),
+    sessionKeepaliveMs: intEnv("NLO_SESSION_KEEPALIVE_MS", 300_000),
+    bale: {
+      botToken: env("NLO_BALE_BOT_TOKEN") ?? null,
+      chatId: env("NLO_BALE_CHAT_ID") ?? null,
+    },
   };
 }
 

@@ -47,7 +47,13 @@ const TRANSITIONS: Record<AuthSessionState, AuthSessionState[]> = {
     // honest (AUTH_IN_PROGRESS -> AUTHENTICATED/AUTH_REQUIRED).
     "AUTH_IN_PROGRESS",
   ],
-  SESSION_EXPIRED: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],
+  // Re-verifying an existing stored file is a legitimate recovery: a session
+  // flagged SESSION_EXPIRED can be proven live again without a re-import, so
+  // a direct verify may move it back to AUTHENTICATED.
+  SESSION_EXPIRED: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED", "AUTHENTICATED"],
+  // SESSION_INVALID stays sticky: a verified identity mismatch cannot be
+  // healed by re-verifying the same file — a fresh import (via
+  // AUTH_IN_PROGRESS) is required.
   SESSION_INVALID: ["AUTH_REQUIRED", "AUTH_IN_PROGRESS", "DISABLED"],
   ACCESS_UNAVAILABLE: ["AUTHENTICATED", "AUTH_IN_PROGRESS", "AUTH_REQUIRED", "DISABLED"],
   DISABLED: ["CONFIGURED", "AUTH_REQUIRED"],
