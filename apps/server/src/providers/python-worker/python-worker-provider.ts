@@ -69,9 +69,15 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       allowDirect?: boolean;
       /** Selects/starts a tunnel for auth ops (login/verify) — fail-closed.
        *  selectAuto self-heals stale health checks (runs the real staged
-       *  check against the NotebookLM target) before failing. */
+       *  check against the NotebookLM target) before failing. The optional
+       *  quarantine methods enable verify failover: a node whose real worker
+       *  verify fails with connectivity/timeout is marked (and auto-deleted
+       *  at the threshold) before the next node is tried. */
       proxyManager?: {
         selectAuto: (preferredNodeId: string | null) => Promise<AuthTunnelSelection>;
+        stopTunnel?: (nodeId: string) => Promise<void>;
+        markNblDestinationFailure?: (nodeId: string, detail: string) => Promise<void>;
+        markNblDestinationSuccess?: (nodeId: string) => Promise<void>;
       };
       /** Configured nodes (direct auth only when none exist). */
       proxiesRepo?: {
@@ -264,6 +270,43 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
   }
 
+  /**
+   * Max proxy nodes to try when a worker verify fails with a failover-able
+   * code (connectivity/timeout). A tunnel that passes the staged health check
+   * can still fail the heavy NotebookLM client; the next node may work.
+   */
+  private static readonly VERIFY_MAX_ATTEMPTS = 3;
+
+  /**
+   * Spawn a worker and run one `verify` op. Returns the parsed result or
+   * throws (WorkerError with the worker's code, or a non-worker error).
+   * The worker is always closed.
+   */
+  private async runWorkerVerify(
+    sessionPath: string,
+    tunnel: { host: string; port: number } | null,
+  ): Promise<{ email: string; notebooks: number }> {
+    const w = new WorkerSupervisor({
+      pythonBin: this.opts.pythonBin,
+      workerPath: this.opts.workerPath,
+      env: tunnel ? this.tunnelEnv(tunnel) : {},
+      // Through a residential proxy the round-trip to Google can be slow;
+      // give verification generous headroom (5 min supervisor / 2 min per
+      // inner request) rather than killing a healthy session check.
+      requestTimeoutMs: 300_000,
+      log: this.log,
+    });
+    try {
+      await w.start();
+      return await w.request<{ email: string; notebooks: number; checkedAt: string }>("verify", {
+        sessionPath,
+        timeoutSec: 120,
+      });
+    } finally {
+      await w.close();
+    }
+  }
+
   async getAccountStatus(accountId: string, credentialRef: string): Promise<ProviderAccountStatus> {
     const sessionPath = this.resolveCredential(credentialRef, accountId);
     if (!existsSync(sessionPath)) {
@@ -275,48 +318,110 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
     // Verification talks to the REAL service: route through a verified tunnel
     // (fail-closed when nodes exist). The tunnel is kept alive while used.
-    const tunnel = await this.acquireAuthTunnel();
-    const w = new WorkerSupervisor({
-      pythonBin: this.opts.pythonBin,
-      workerPath: this.opts.workerPath,
-      env: tunnel.handle ? this.tunnelEnv(tunnel.handle) : {},
-      // Through a residential proxy the round-trip to Google can be slow;
-      // give verification generous headroom (5 min supervisor / 2 min per
-      // inner request) rather than killing a healthy session check.
-      requestTimeoutMs: 300_000,
-      log: this.log,
-    });
-    try {
-      await w.start();
-      const r = await w.request<{ email: string; notebooks: number; checkedAt: string }>("verify", {
-        sessionPath,
-        timeoutSec: 120,
-      });
-      return {
-        ok: true,
-        email: r.email,
-        detail: `verified against service (${r.notebooks} notebooks)`,
-      };
-    } catch (e) {
-      const code = e instanceof WorkerError ? e.code : "provider";
-      const message = e instanceof Error ? e.message : String(e);
-      const cls = this.toFailureClass(code);
-      if (cls === "auth") {
+    const pm = this.opts.proxyManager;
+    const enabled = this.opts.proxiesRepo?.listEnabled() ?? [];
+    if (!pm || enabled.length === 0) {
+      const tunnel = await this.acquireAuthTunnel();
+      try {
+        const r = await this.runWorkerVerify(sessionPath, tunnel.handle);
         return {
-          ok: false,
-          email: null,
-          detail: `session rejected by service (re-login required): ${message.slice(0, 200)}`,
+          ok: true,
+          email: r.email,
+          detail: `verified against service (${r.notebooks} notebooks)`,
         };
+      } catch (e) {
+        return this.failVerify(e);
       }
-      throw new ProviderFailure({
-        failureClass: cls,
-        message,
-        ambiguous: isAmbiguousCode(code),
-        needsReauth: false, // auth case already returned above
-      });
-    } finally {
-      await w.close();
     }
+
+    // Proxy route with VERIFY FAILOVER (cap VERIFY_MAX_ATTEMPTS nodes):
+    //  - worker verify ok            -> node proven, streak reset, return
+    //  - worker error `auth`         -> the node worked; the SESSION is bad
+    //                                   (streak reset, soft failure)
+    //  - worker error `connectivity`
+    //    or `timeout`                 -> real NBL-destination failure on THIS
+    //                                   node: quarantine accounting (streak,
+    //                                   unhealthy, tunnel stop, auto-delete
+    //                                   at threshold), then re-select
+    //  - any other code              -> no failover (not the route's fault)
+    const tried: { name: string; code: string }[] = [];
+    for (let attempt = 1; attempt <= PythonWorkerProvider.VERIFY_MAX_ATTEMPTS; attempt++) {
+      const sel = await pm.selectAuto(null);
+      this.log(
+        `auth op routed through node ${sel.node.config.name} (tunnel ${sel.handle.host}:${sel.handle.port}), verify attempt ${attempt}/${PythonWorkerProvider.VERIFY_MAX_ATTEMPTS}`,
+      );
+      try {
+        const r = await this.runWorkerVerify(sessionPath, sel.handle);
+        await pm.markNblDestinationSuccess?.(sel.node.id).catch(() => {});
+        return {
+          ok: true,
+          email: r.email,
+          detail: `verified against service (${r.notebooks} notebooks)`,
+        };
+      } catch (e) {
+        const code = e instanceof WorkerError ? e.code : "provider";
+        const cls = this.toFailureClass(code);
+        if (cls === "auth") {
+          // The route worked — the service answered and rejected the session.
+          await pm.markNblDestinationSuccess?.(sel.node.id).catch(() => {});
+          return {
+            ok: false,
+            email: null,
+            detail: `session rejected by service (re-login required): ${String(
+              e instanceof Error ? e.message : e,
+            )
+              .slice(0, 200)}`,
+          };
+        }
+        if (code === "connectivity" || code === "timeout") {
+          tried.push({ name: sel.node.config.name, code });
+          await pm
+            .markNblDestinationFailure?.(sel.node.id, `${code}: ${String(e).slice(0, 200)}`)
+            .catch(() => {});
+          this.log(
+            `verify failed on ${sel.node.config.name} with '${code}' — failing over to next node`,
+          );
+          continue;
+        }
+        // Non-failover code (rate_limit, invalid_input, ...): not the route's
+        // fault — stop immediately (the auth case returned above; this
+        // throws for every remaining class).
+        return this.failVerify(e);
+      }
+    }
+    throw new ProviderFailure({
+      failureClass: "connectivity",
+      message: `all ${tried.length} proxy node(s) failed verify: ${tried
+        .map((t) => `${t.name} (${t.code})`)
+        .join(", ")}`,
+      ambiguous: false,
+      needsReauth: false,
+    });
+  }
+
+  /**
+   * Map a worker/verify error: the soft `auth` failure result, or a thrown
+   * ProviderFailure for everything else. Callers in the failover loop handle
+   * `auth` earlier (with a success mark), so in practice only the throw
+   * branch is reached there.
+   */
+  private failVerify(e: unknown): ProviderAccountStatus {
+    const code = e instanceof WorkerError ? e.code : "provider";
+    const message = e instanceof Error ? e.message : String(e);
+    const cls = this.toFailureClass(code);
+    if (cls === "auth") {
+      return {
+        ok: false,
+        email: null,
+        detail: `session rejected by service (re-login required): ${message.slice(0, 200)}`,
+      };
+    }
+    throw new ProviderFailure({
+      failureClass: cls,
+      message,
+      ambiguous: isAmbiguousCode(code),
+      needsReauth: false, // auth case already returned above
+    });
   }
 
   async runJob(req: ProviderJobRequest): Promise<ProviderJobResult> {

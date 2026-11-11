@@ -54,6 +54,12 @@ export interface AppContext {
    * close.
    */
   keeper: SessionKeeper | null;
+  /**
+   * In-flight async cookie imports (202 + background verify). close() DRAINS
+   * these before closing the provider/DB so a restart never abandons a
+   * mid-verify import.
+   */
+  importInFlight: Set<Promise<void>>;
   /** Admin gate for the infrastructure API (disabled unless env credentials set). */
   adminAuth: AdminAuth;
   /** API keys for machine-to-machine access to the job surface. */
@@ -92,6 +98,9 @@ export function createAppContext(
   // One shared auth lock per account (import/verify/keeper serialize on it).
   const authGuard = new AuthGuardImpl();
 
+  // In-flight async imports (drained on close — see AppContext.importInFlight).
+  const importInFlight = new Set<Promise<void>>();
+
   mkdirSync(paths.sessionsDir, { recursive: true, mode: 0o700 });
   mkdirSync(paths.vendorDir, { recursive: true });
 
@@ -114,6 +123,15 @@ export function createAppContext(
     (nodeId) => mockRuntime.scenario(nodeId),
   );
 
+  // One notifier for the whole process: session-keeper alerts AND proxy
+  // auto-delete alerts share the same Bale bot (and the same no-op when
+  // unconfigured).
+  const notifier = new BaleNotifier({
+    botToken: config.bale.botToken,
+    chatId: config.bale.chatId,
+    log: (msg) => console.log(`[nlo:bale] ${msg}`),
+  });
+
   const proxyManager = new ProxyManager(
     proxies,
     runtime,
@@ -135,7 +153,11 @@ export function createAppContext(
       };
     },
     vault,
-    { log: (msg) => console.log(`[nlo:proxy] ${msg}`) },
+    {
+      log: (msg) => console.log(`[nlo:proxy] ${msg}`),
+      notifier,
+      autoDeleteAfter: config.proxyAutoDeleteAfter,
+    },
   );
 
   // Provider selection is EXPLICIT and observable: config.provider decides.
@@ -202,11 +224,6 @@ export function createAppContext(
   let keeper: SessionKeeper | null = null;
   const startKeeper = opts.startKeeper ?? true;
   if (startKeeper && config.provider === "python-worker" && config.sessionKeepaliveMs > 0) {
-    const notifier = new BaleNotifier({
-      botToken: config.bale.botToken,
-      chatId: config.bale.chatId,
-      log: (msg) => console.log(`[nlo:bale] ${msg}`),
-    });
     keeper = new SessionKeeper({
       intervalMs: config.sessionKeepaliveMs,
       accounts,
@@ -241,6 +258,7 @@ export function createAppContext(
     queue,
     authGuard,
     keeper,
+    importInFlight,
     adminAuth: createAdminAuth(config),
     apiKeys,
     close: async () => {
@@ -248,6 +266,9 @@ export function createAppContext(
       // close the DB (or the worker/tunnel) while a cycle is mid-write.
       await keeper?.stop();
       await queue.stop();
+      // Drain in-flight async cookie imports (background verifies) BEFORE the
+      // provider/worker and DB go away, so a restart never abandons one.
+      await Promise.all([...importInFlight].map((p) => p.catch(() => {})));
       (provider as { dispose?: () => void }).dispose?.();
       await (runtime as { close?: () => Promise<void> }).close?.();
       db.close();

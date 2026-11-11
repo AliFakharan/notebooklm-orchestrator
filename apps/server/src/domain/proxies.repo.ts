@@ -118,6 +118,32 @@ export class ProxiesRepo {
     return this.list().filter((n) => n.enabled);
   }
 
+  /**
+   * Consecutive NBL-destination failures for a node (0 when unknown).
+   * Internal quarantine bookkeeping: never serialized on ProxyNode.
+   */
+  nblFailStreak(nodeId: string): number {
+    const row = this.db.raw
+      .prepare("SELECT nbl_fail_streak FROM proxy_nodes WHERE id = ?")
+      .get(nodeId) as { nbl_fail_streak: number } | undefined;
+    return row ? row.nbl_fail_streak : 0;
+  }
+
+  /** Bump the streak by one and return the new value. No-op for unknown ids. */
+  incrementNblFailStreak(nodeId: string): number {
+    const res = this.db.raw
+      .prepare("UPDATE proxy_nodes SET nbl_fail_streak = nbl_fail_streak + 1 WHERE id = ?")
+      .run(nodeId);
+    return Number(res.changes) > 0 ? this.nblFailStreak(nodeId) : 0;
+  }
+
+  /** Clear the streak. No-op for unknown ids. */
+  resetNblFailStreak(nodeId: string): void {
+    this.db.raw
+      .prepare("UPDATE proxy_nodes SET nbl_fail_streak = 0 WHERE id = ?")
+      .run(nodeId);
+  }
+
   health(nodeId: string): ProxyHealth | null {
     const row = this.db.raw.prepare("SELECT * FROM proxy_health WHERE node_id = ?").get(nodeId) as
       Record<string, unknown> | undefined;

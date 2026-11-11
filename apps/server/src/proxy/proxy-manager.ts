@@ -3,6 +3,15 @@ import { parseAllowEntry, type AllowEntry, type HealthCategory, type ProxyNode }
 import type { ProxiesRepo } from "../domain/proxies.repo.js";
 import { ProxyRuntimeError, type ProxyRuntime, type TunnelHandle } from "./runtime.js";
 import type { SecretVault } from "../secrets/vault.js";
+import { baleMessages } from "../notify/bale.js";
+
+/**
+ * Narrow notifier contract (satisfied by BaleNotifier). Kept local so the
+ * proxy layer does not depend on the notification implementation.
+ */
+export interface ProxyNotifier {
+  send(text: string): Promise<void>;
+}
 
 /**
  * ProxyManager: node selection, tunnel lifecycle, and REAL staged health
@@ -53,6 +62,9 @@ export class ProxyManager {
   private readonly selfHealTarget: { host: string; port: number };
 
   private readonly logFn: (line: string) => void;
+  private readonly notifier: ProxyNotifier | null;
+  /** Consecutive NBL-destination failures that trigger auto-delete; 0 disables. */
+  private readonly autoDeleteAfter: number;
 
   constructor(
     private readonly repo: ProxiesRepo,
@@ -73,12 +85,16 @@ export class ProxyManager {
       healthTtlMs?: number;
       selfHealTarget?: { host: string; port: number };
       log?: (line: string) => void;
+      notifier?: ProxyNotifier;
+      autoDeleteAfter?: number;
     } = {},
   ) {
     this.allowlist = allowlistRaw.map((s) => parseAllowEntry(s));
     this.healthTtlMs = opts.healthTtlMs ?? 10 * 60_000;
     this.selfHealTarget = opts.selfHealTarget ?? { host: "notebooklm.google.com", port: 443 };
     this.logFn = opts.log ?? (() => {});
+    this.notifier = opts.notifier ?? null;
+    this.autoDeleteAfter = opts.autoDeleteAfter ?? 3;
   }
 
   private log(line: string): void {
@@ -171,6 +187,10 @@ export class ProxyManager {
    *  a large pool. */
   private static readonly SELF_HEAL_MAX_CANDIDATES = 12;
 
+  /** Candidates re-checked in parallel during self-heal (batched): 12 dead
+   *  nodes drop from ~12x20s sequential to ~3x20s of wall time. */
+  private static readonly SELF_HEAL_CONCURRENCY = 4;
+
   /** A node whose single HTTP round-trip through the tunnel to Google takes
    *  longer than this is too slow for the real (much heavier) NotebookLM
    *  client, which would exceed its worker deadline. Treated as
@@ -186,11 +206,16 @@ export class ProxyManager {
    * passes, without asking the user to click "health check" first.
    *
    * Candidates are re-checked in priority order (preferred node first when
-   * given) until one passes; a dead top-priority node must not block a job
-   * when a lower-priority node is alive.
+   * given), in PARALLEL batches of SELF_HEAL_CONCURRENCY: the first batch
+   * that produces a fast-ok short-circuits the remaining batches (a
+   * higher-priority fast-ok always beats a lower-priority one), otherwise
+   * the fastest slow-ok wins, and only if nothing responds does selection
+   * fail. A dead top-priority node must not block a job when a
+   * lower-priority node is alive.
    *
-   * Still fail-closed: the check is real (CONNECT + TLS + HTTP through the
-   * tunnel), and a failed check is a failed route — never a direct fallback.
+   * Still fail-closed: every check is real (SSRF-guarded, CONNECT + TLS +
+   * HTTP through the node's own tunnel), and a failed check is a failed
+   * route — never a direct fallback.
    */
   async selectAuto(preferredNodeId: string | null): Promise<SelectionInfo> {
     try {
@@ -214,27 +239,57 @@ export class ProxyManager {
       const failures: { name: string; error: string | null }[] = [];
       let chosen: { id: string; name: string } | null = null; // fast + healthy
       const slowOk: { id: string; name: string; latencyMs: number }[] = [];
-      for (const cand of candidates) {
+
+      // Parallel batches of SELF_HEAL_CONCURRENCY candidates. Within a batch
+      // the checks run concurrently; the verdicts are then folded in PRIORITY
+      // order (batch order), so a higher-priority fast-ok always wins even if
+      // a lower-priority neighbor finished first. A batch that yields a
+      // fast-ok short-circuits the remaining (lower-priority) batches.
+      const checkOne = async (
+        cand: (typeof candidates)[number],
+      ): Promise<{ cand: (typeof candidates)[number]; hc: HealthCheckResult | null; error: string | null }> => {
         this.log(
           `no fresh proxy health — running staged check on ${cand.config.name} against the real target before use`,
         );
-        const hc = await this.runHealthCheck(cand.id, this.selfHealTarget);
-        if (!hc.ok) {
-          failures.push({ name: cand.config.name, error: hc.error ?? "health check failed" });
-          continue;
+        try {
+          const hc = await this.runHealthCheck(cand.id, this.selfHealTarget);
+          return { cand, hc, error: null };
+        } catch (e) {
+          return {
+            cand,
+            hc: null,
+            error: e instanceof Error ? e.message : String(e),
+          };
         }
-        const slow = hc.latencyMs !== null && hc.latencyMs > ProxyManager.SELF_HEAL_MAX_LATENCY_MS;
-        if (!slow) {
-          chosen = { id: cand.id, name: cand.config.name };
-          break;
+      };
+      for (let i = 0; i < candidates.length; i += ProxyManager.SELF_HEAL_CONCURRENCY) {
+        const batch = candidates.slice(i, i + ProxyManager.SELF_HEAL_CONCURRENCY);
+        const results = await Promise.all(batch.map((cand) => checkOne(cand)));
+        for (const { cand, hc, error } of results) {
+          if (!hc) {
+            failures.push({ name: cand.config.name, error: error ?? "health check failed" });
+            continue;
+          }
+          if (!hc.ok) {
+            failures.push({ name: cand.config.name, error: hc.error ?? "health check failed" });
+            continue;
+          }
+          const slow =
+            hc.latencyMs !== null && hc.latencyMs > ProxyManager.SELF_HEAL_MAX_LATENCY_MS;
+          if (!slow) {
+            // First fast-ok in priority order wins the whole self-heal.
+            if (!chosen) chosen = { id: cand.id, name: cand.config.name };
+            continue;
+          }
+          // Responds, but too slow for the heavy NotebookLM client. Keep
+          // looking for a faster node; remember this one as a last resort.
+          slowOk.push({ id: cand.id, name: cand.config.name, latencyMs: hc.latencyMs ?? 0 });
+          failures.push({
+            name: cand.config.name,
+            error: `slow (${hc.latencyMs}ms > ${ProxyManager.SELF_HEAL_MAX_LATENCY_MS}ms)`,
+          });
         }
-        // Responds, but too slow for the heavy NotebookLM client. Keep looking
-        // for a faster node; remember this one as a last resort.
-        slowOk.push({ id: cand.id, name: cand.config.name, latencyMs: hc.latencyMs ?? 0 });
-        failures.push({
-          name: cand.config.name,
-          error: `slow (${hc.latencyMs}ms > ${ProxyManager.SELF_HEAL_MAX_LATENCY_MS}ms)`,
-        });
+        if (chosen) break;
       }
 
       // A fast healthy node wins. Otherwise fall back to the fastest
@@ -266,6 +321,170 @@ export class ProxyManager {
   }
 
   /**
+   * Select with WORKER-LEVEL failover: like selectAuto, but the caller can
+   * plug in a real verification of the started tunnel (e.g. running the
+   * notebooklm worker's verify through it). A route that passes the staged
+   * health check can still hang the heavy NotebookLM client, so only a
+   * successful `verify` makes a node usable.
+   *
+   * - `verify` returns { ok: true } -> the selection is returned.
+   * - `verify` returns a `connectivity`/`timeout` code -> the node suffered a
+   *   real NBL-destination failure: quarantine accounting runs (streak bump,
+   *   unhealthy health row, tunnel stopped, auto-delete at threshold) and
+   *   selection restarts from the remaining state. The failed node is now
+   *   unhealthy or deleted, so selectAuto naturally advances.
+   * - any other code (auth, rate_limit, ...) -> throw immediately: failover
+   *   cannot help (the problem is not the route).
+   * - capped at `maxAttempts` (default 3); exhaustion throws with every node
+   *   tried and its code.
+   *
+   * Still fail-closed: every step goes through a started tunnel.
+   */
+  async selectWithFailover(
+    preferredNodeId: string | null,
+    opts: {
+      maxAttempts?: number;
+      verify?: (
+        sel: SelectionInfo,
+      ) => Promise<{ ok: boolean; code?: string; detail?: string }>;
+    } = {},
+  ): Promise<SelectionInfo> {
+    const maxAttempts = opts.maxAttempts ?? 3;
+    const verify = opts.verify;
+    const tried: { name: string; code: string; detail: string }[] = [];
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const sel = await this.selectAuto(attempt === 1 ? preferredNodeId : null);
+      if (!verify) return sel;
+
+      let verdict: { ok: boolean; code?: string; detail?: string };
+      try {
+        verdict = await verify(sel);
+      } catch (e) {
+        verdict = { ok: false, code: "provider", detail: e instanceof Error ? e.message : String(e) };
+      }
+      if (verdict.ok) return sel;
+
+      const code = verdict.code ?? "unknown";
+      const detail = verdict.detail ?? "";
+      tried.push({ name: sel.node.config.name, code, detail });
+
+      if (code !== "connectivity" && code !== "timeout") {
+        throw new Error(
+          `verify failed on node ${sel.node.config.name} (${sel.node.id}) with non-failover code '${code}'${
+            detail ? `: ${detail}` : ""
+          }`,
+        );
+      }
+
+      // Destination-level failure on THIS node: quarantine accounting
+      // (streak, unhealthy health, tunnel stop, auto-delete at threshold).
+      // Re-selection then advances from the updated state.
+      await this.markNblDestinationFailure(sel.node.id, `${code}${detail ? `: ${detail}` : ""}`);
+      if (attempt === maxAttempts) break;
+    }
+
+    throw new Error(
+      `proxy failover exhausted after ${tried.length} node(s): ${tried
+        .map((t) => `${t.name}: ${t.code}${t.detail ? ` (${t.detail.slice(0, 120)})` : ""}`)
+        .join(" | ")}`,
+    );
+  }
+
+  /**
+   * Record a NOTEBOOKLM-DESTINATION failure for a node (the node's route to
+   * NotebookLM specifically did not work — as opposed to config/runtime/
+   * tunnel-start problems, which are NOT NBL destination failures).
+   *
+   * 1. Bumps the internal fail streak (ProxiesRepo).
+   * 2. Marks the node unhealthy in proxy_health so selection skips it until a
+   *    real health check proves the route works again (unless the caller has
+   *    already persisted a precise check result — `recordHealth: false`).
+   * 3. Stops the node's tunnel if active.
+   * 4. At the threshold (autoDeleteAfter), AUTO-DELETES the node (repo +
+   *    vault-secret hygiene, same as the delete route) and notifies.
+   *
+   * Best-effort: never throws into the caller.
+   */
+  async markNblDestinationFailure(
+    nodeId: string,
+    detail: string,
+    opts: { recordHealth?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const node = this.repo.get(nodeId);
+      if (!node) return; // already deleted — nothing to quarantine
+      const streak = this.repo.incrementNblFailStreak(nodeId);
+      this.log(
+        `node ${node.config.name} NBL destination failure (${detail}), streak ${streak}/${
+          this.autoDeleteAfter > 0 ? this.autoDeleteAfter : "off"
+        }`,
+      );
+      if (opts.recordHealth !== false) {
+        this.repo.setHealth(
+          {
+            lastCheckedAt: new Date().toISOString(),
+            ok: false,
+            egressIp: null,
+            latencyMs: null,
+            error: detail,
+            startedAt: new Date().toISOString(),
+            target: null,
+            category: "upstream",
+            evidence: "NBL destination failure (worker/job verdict)",
+          },
+          nodeId,
+        );
+      }
+      await this.runtime.stopTunnel(nodeId).catch(() => {});
+      if (this.autoDeleteAfter > 0 && streak >= this.autoDeleteAfter) {
+        await this.autoDeleteNode(node, streak, detail);
+      }
+    } catch (e) {
+      this.log(
+        `markNblDestinationFailure(${nodeId}) failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * Record a NotebookLM-destination SUCCESS: the node's route to NotebookLM
+   * demonstrably worked, so any accumulated fail streak is cleared.
+   * Never throws.
+   */
+  async markNblDestinationSuccess(nodeId: string): Promise<void> {
+    try {
+      const node = this.repo.get(nodeId);
+      if (!node) return;
+      this.repo.resetNblFailStreak(nodeId);
+      this.log(`node ${node.config.name} NBL destination OK, streak reset`);
+    } catch (e) {
+      this.log(
+        `markNblDestinationSuccess(${nodeId}) failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /** Auto-delete a quarantined node: tunnel already stopped by the caller. */
+  private async autoDeleteNode(node: ProxyNode, streak: number, reason: string): Promise<void> {
+    this.repo.delete(node.id);
+    // Vault hygiene identical to the delete route: remove the secret ONLY if
+    // no remaining node references it (nodes frequently share one UUID).
+    const ref = node.config.uuidSecretRef;
+    if (!this.repo.list().some((n) => n.config.uuidSecretRef === ref)) {
+      try {
+        this.vault.delete(ref);
+      } catch {
+        // already gone — harmless
+      }
+    }
+    this.log(
+      `node ${node.config.name} auto-deleted after ${streak} consecutive NBL destination failures (last: ${reason})`,
+    );
+    await this.notifier?.send(baleMessages.nodeDeleted(node.config.name, streak)).catch(() => {});
+  }
+
+  /**
    * Full staged health check. Every stage's outcome is persisted (category +
    * evidence), and the tunnel is always stopped afterwards.
    */
@@ -275,6 +494,9 @@ export class ProxyManager {
   ): Promise<HealthCheckResult> {
     const startedAt = new Date().toISOString();
     const node = this.repo.getOrThrow(nodeId);
+    // Quarantine accounting applies ONLY to the actual NotebookLM destination
+    // (echo/egress-IP targets prove the route but never prove NotebookLM).
+    const isNblDest = /notebooklm/i.test(dest.host);
     const persist = (r: Omit<HealthCheckResult, "startedAt">) => {
       this.repo.setHealth(
         {
@@ -384,10 +606,17 @@ export class ProxyManager {
           startedAt,
         };
         persist(res2);
+        if (isNblDest) {
+          // Destination-level NBL failure: count it (health already persisted
+          // above with the precise category/evidence).
+          void this.markNblDestinationFailure(nodeId, res.error ?? "destination fetch failed", {
+            recordHealth: false,
+          });
+        }
         return res2;
       }
       const egressIp = extractIp(res.body);
-      const isNbl = /notebooklm/i.test(dest.host);
+      const isNbl = isNblDest;
 
       // E. Runtime-level verdict (e.g. expected-egress-IP enforcement by the
       //    mock; for xray this is the same real check re-confirmed).
@@ -410,6 +639,15 @@ export class ProxyManager {
         startedAt,
       };
       persist(res3);
+      if (isNblDest) {
+        if (finalOk) {
+          void this.markNblDestinationSuccess(nodeId);
+        } else {
+          void this.markNblDestinationFailure(nodeId, verdict.error ?? "destination check failed", {
+            recordHealth: false,
+          });
+        }
+      }
       return res3;
     } finally {
       await this.runtime.stopTunnel(nodeId).catch(() => {});

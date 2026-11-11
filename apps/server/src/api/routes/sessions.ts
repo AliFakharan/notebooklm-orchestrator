@@ -79,19 +79,6 @@ const verifyResultSchema = {
   },
 };
 
-const importResultSchema = {
-  type: "object",
-  additionalProperties: true,
-  properties: {
-    ok: { type: "boolean" },
-    email: { type: ["string", "null"] },
-    detail: { type: ["string", "null"] },
-    mismatch: { type: "boolean" },
-    session: { type: "object", additionalProperties: true },
-    note: { type: "string" },
-  },
-};
-
 const sessionVerifyOptions = {
   schema: {
     summary: "Verify the account's session against the real service",
@@ -245,6 +232,34 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     }
   };
 
+  /**
+   * Background half of a paste-import: the tunnel-routed service check that
+   * decides the final session state. The session row IS the status — the UI
+   * polls GET /import-status. Never throws: the auth guard is always
+   * released (finally).
+   */
+  const runImportVerify = async (accountId: string): Promise<void> => {
+    try {
+      const r = await verifySession(ctx, accountId);
+      if (r.mismatch) {
+        // Verified, but the identity is someone else: never green.
+        ctx.sessions.transition(accountId, VERIFY_PROVIDER, "SESSION_INVALID", {
+          lastError: r.detail ?? "identity mismatch",
+        });
+      }
+      // ok:false is already AUTH_REQUIRED (verifyCore made that transition,
+      // lastError carries the reason).
+    } catch (e) {
+      // Hard provider error (worker down, no proxy route, service hard-fail):
+      // a rejected import, not a server fault — back to AUTH_REQUIRED with
+      // the reason.
+      const msg = e instanceof Error ? e.message : String(e);
+      recordAuthFailure(accountId, msg);
+    } finally {
+      ctx.authGuard.leave(accountId);
+    }
+  };
+
   // --- verify against the real service --------------------------------------
   // Shares ctx.authGuard with the background keeper and the import path so a
   // verify never races a concurrent import/keeper poke on the same file.
@@ -317,7 +332,10 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
           "Paste cookies copied from your own browser after signing into notebooklm. " +
           "Auto-detects Playwright storage state, a JSON cookie array, or Netscape cookies.txt; " +
           "filters to google.com cookies, writes them 0600, and verifies against the REAL " +
-          "service before the account may be used. Provide one of cookies, base64, or serverPath.",
+          "service before the account may be used. The tunnel-routed verification runs in the " +
+          "background: this route returns 202 immediately and the result is read by polling " +
+          "GET /api/sessions/:id/import-status until the state leaves AUTH_IN_PROGRESS. " +
+          "Provide one of cookies, base64, or serverPath.",
         params: { type: "object", properties: { id: { type: "string" } } },
         body: {
           type: "object",
@@ -335,14 +353,17 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
           },
         },
         response: {
-          200: importResultSchema,
+          202: {
+            required: ["status"],
+            properties: { status: { type: "string", enum: ["accepted"] } },
+          },
           400: { $ref: "Error" },
           404: { $ref: "Error" },
           409: { $ref: "Error" },
         },
       },
     },
-    async (req) => {
+    async (req, reply) => {
       const w = requireWorker();
       const acct = ctx.accounts.getOrThrow(req.params.id);
       const body = importBody.parse(req.body);
@@ -386,39 +407,61 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       await writeFile(dest, stateJson);
       await chmod(dest, 0o600);
 
-      // --- the service's verdict decides the state ------------------------------
+      // --- the service's verdict decides the state (background) -----------------
       // verifySession performs its own transitions from AUTH_IN_PROGRESS:
       //  success  -> AUTHENTICATED (+ account identity sync)
       //  rejected -> AUTH_REQUIRED (session.lastError carries the reason)
+      //  mismatch -> SESSION_INVALID
+      // The tunnel-routed check can take tens of seconds: accept the file now
+      // (202), verify in the background, let the UI poll GET /import-status.
       canEnterAuth(acct.id);
-      try {
-        let r: Awaited<ReturnType<typeof verifySession>>;
-        try {
-          r = await verifySession(ctx, acct.id);
-        } catch (e) {
-          // The provider surfaced a HARD error while the service checked the
-          // imported session (e.g. notebooklm-py rejected the cookie set:
-          // "missing required cookies"). That is a rejected import, not a
-          // server fault: keep the stored file, return to AUTH_REQUIRED with
-          // the reason, and report a clean 409 (never a 500).
-          const msg = e instanceof Error ? e.message : String(e);
-          recordAuthFailure(acct.id, msg);
-          throw new ApiError(ApiCodes.conflict, `imported session rejected: ${msg}`, 409);
-        }
-        if (!r.ok) {
-          return { ...r, note: "file stored, but the service rejected it" };
-        }
-        if (r.mismatch) {
-          // Verified, but the identity is someone else: never green.
-          ctx.sessions.transition(acct.id, VERIFY_PROVIDER, "SESSION_INVALID", {
-            lastError: r.detail ?? "identity mismatch",
-          });
-          throw new ApiError(ApiCodes.conflict, r.detail ?? "identity mismatch", 409);
-        }
-        return r;
-      } finally {
-        ctx.authGuard.leave(acct.id);
-      }
+      const p = runImportVerify(acct.id);
+      ctx.importInFlight.add(p);
+      void p.finally(() => ctx.importInFlight.delete(p));
+      reply.code(202).send({ status: "accepted" });
+    },
+  );
+
+  // --- import status: poll after a 202 ----------------------------------------
+  // The session row IS the status: state leaves AUTH_IN_PROGRESS exactly when
+  // the background verify finished (the auth guard is released in the same
+  // finally that performs the transition).
+  app.get<{ Params: { id: string } }>(
+    "/api/sessions/:id/import-status",
+    {
+      schema: {
+        summary: "Poll the result of a background cookie import",
+        tags: ["sessions"],
+        security: ADMIN_SECURITY,
+        description:
+          "Current session state after a POST /import (202). Poll until state leaves " +
+          "AUTH_IN_PROGRESS: AUTHENTICATED (email filled in), AUTH_REQUIRED (lastError " +
+          "carries the rejection reason), or SESSION_INVALID (identity mismatch).",
+        params: { type: "object", properties: { id: { type: "string" } } },
+        response: {
+          200: {
+            type: "object",
+            required: ["state", "email", "lastError"],
+            properties: {
+              state: { type: "string" },
+              email: { type: ["string", "null"] },
+              lastError: { type: ["string", "null"] },
+            },
+          },
+          400: { $ref: "Error" },
+          404: { $ref: "Error" },
+        },
+      },
+    },
+    async (req) => {
+      const acct = ctx.accounts.get(req.params.id);
+      if (!acct) throw new ApiError(ApiCodes.notFound, "account not found", 404);
+      const session = ctx.sessions.get(acct.id, VERIFY_PROVIDER);
+      return {
+        state: session?.state ?? "UNKNOWN",
+        email: session?.email ?? null,
+        lastError: session?.lastError ?? null,
+      };
     },
   );
 

@@ -29,6 +29,8 @@ export const baleMessages = {
     `⚠️ نشست گوگل اکانت ${email} منقضی شده. لطفاً دوباره وارد شوید و کوکی‌ها را در اپلیکیشن paste کنید.`,
   recovery: (email: string) => `✅ اکانت ${email} دوباره فعال شد.`,
   infra: (email: string) => `⚠️ امکان بررسی اکانت ${email} نیست (مشکل تونل/وورکر).`,
+  nodeDeleted: (name: string, streak: number) =>
+    `⚠️ گره «${name}» به‌خاطر ${streak} خطای متوالی به NotebookLM حذف شد.`,
 } as const;
 
 export class BaleNotifier {

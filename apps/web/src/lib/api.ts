@@ -569,13 +569,30 @@ export function sessionRefresh(accountId: string): Promise<SessionVerifyResult> 
  * browser (the only auth path). Accepted text: Playwright storage-state JSON,
  * a JSON cookie array (Cookie-Editor export), or Netscape cookies.txt
  * (Get-cookies.txt export). The server parses, filters to google.com cookies,
- * stores 0600, and verifies against the real service.
+ * stores 0600, and verifies against the real service IN THE BACKGROUND: this
+ * returns 202 immediately and the verdict is read via sessionImportStatus().
  */
 export function sessionImport(
   accountId: string,
   body: { cookies?: string; base64?: string; serverPath?: string },
-): Promise<SessionVerifyResult> {
+): Promise<{ status: "accepted" }> {
   return request(`/api/sessions/${accountId}/import`, jsonInit("POST", body));
+}
+
+export interface SessionImportStatus {
+  state: AuthSessionState;
+  email: string | null;
+  lastError: string | null;
+}
+
+/**
+ * Poll the result of a background cookie import. `state` leaves
+ * AUTH_IN_PROGRESS exactly when the tunnel-routed verify finished:
+ * AUTHENTICATED (email filled in), AUTH_REQUIRED (lastError = rejection
+ * reason), or SESSION_INVALID (identity mismatch).
+ */
+export function sessionImportStatus(accountId: string): Promise<SessionImportStatus> {
+  return request(`/api/sessions/${accountId}/import-status`);
 }
 
 export function sessionLogout(accountId: string): Promise<{ ok: boolean }> {

@@ -49,6 +49,12 @@ export interface AppConfig {
    */
   sessionKeepaliveMs: number;
   /**
+   * Consecutive NotebookLM-destination failures after which a proxy node is
+   * auto-deleted (quarantined). `0` disables auto-delete (streaks are still
+   * tracked and health is still marked unhealthy). Default 3.
+   */
+  proxyAutoDeleteAfter: number;
+  /**
    * Bale bot push notifications (expiry / recovery / infra alerts). Both
    * values optional: when either is missing the notifier is disabled and
    * checks still run (they just don't alert). The token is a secret and is
@@ -178,6 +184,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),
     sessionKeepaliveMs: intEnv("NLO_SESSION_KEEPALIVE_MS", 300_000),
+    proxyAutoDeleteAfter: intEnv("NLO_PROXY_AUTO_DELETE_AFTER", 3),
     bale: {
       botToken: env("NLO_BALE_BOT_TOKEN") ?? null,
       chatId: env("NLO_BALE_CHAT_ID") ?? null,

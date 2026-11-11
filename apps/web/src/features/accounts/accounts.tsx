@@ -18,6 +18,7 @@ import {
   accountsList,
   providerInfo,
   sessionImport,
+  sessionImportStatus,
   sessionLogout,
   sessionRefresh,
   sessionsList,
@@ -25,6 +26,7 @@ import {
   type Account,
   type ProviderInfo,
   type SessionAccountView,
+  type SessionImportStatus,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -486,6 +488,7 @@ function CookieImportDialog({
   const { toast } = useToast();
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
 
@@ -499,16 +502,42 @@ function CookieImportDialog({
 
   if (!account) return null;
 
+  /** Poll the import status every 2s until the background verify finished
+   *  (state leaves AUTH_IN_PROGRESS) or the ~5-minute deadline passes. */
+  const pollImportStatus = async (id: string): Promise<SessionImportStatus> => {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    for (;;) {
+      const s = await sessionImportStatus(id);
+      if (s.state !== "AUTH_IN_PROGRESS") return s;
+      if (Date.now() > deadline) {
+        throw new Error("تأیید زنده در مهلت مشخص‌شده کامل نشد؛ دوباره امتحان کنید.");
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  };
+
   const run = async () => {
     if (!text.trim()) {
       setErr("متن کوکی‌ها را وارد کرده‌اید؟");
       return;
     }
     setBusy(true);
+    setVerifying(false);
     setErr(null);
     try {
-      const res = await sessionImport(account.id, { cookies: text });
-      if (res.mismatch) {
+      // 202 — the tunnel-routed verify against the real service now runs in
+      // the background; the session row IS the status.
+      await sessionImport(account.id, { cookies: text });
+      setVerifying(true);
+      const final = await pollImportStatus(account.id);
+      if (final.state === "AUTHENTICATED") {
+        toast({
+          title: "جلسه وارد و تأیید شد",
+          description: final.email ?? undefined,
+          variant: "success",
+        });
+        setText("");
+      } else if (final.state === "SESSION_INVALID") {
         toast({
           title: "ناسازگاری هویت",
           description:
@@ -517,17 +546,17 @@ function CookieImportDialog({
         });
       } else {
         toast({
-          title: res.ok ? "جلسه وارد و تأیید شد" : "جلسه پذیرفته نشد",
-          description: res.detail ?? undefined,
-          variant: res.ok ? "success" : "error",
+          title: "جلسه پذیرفته نشد",
+          description: final.lastError ?? undefined,
+          variant: "error",
         });
       }
-      if (res.ok) setText("");
       onDone();
     } catch (e) {
       setErr(actionableImportError(errMessage(e)));
     } finally {
       setBusy(false);
+      setVerifying(false);
     }
   };
 
@@ -541,7 +570,11 @@ function CookieImportDialog({
         <>
           <Button disabled={busy || !text.trim()} onClick={() => void run()}>
             <Upload />
-            {busy ? "در حال ذخیره و تأیید…" : "ذخیره و تأیید"}
+            {verifying
+              ? "در حال تأیید در برابر سرویس…"
+              : busy
+                ? "در حال ذخیره و تأیید…"
+                : "ذخیره و تأیید"}
           </Button>
           <Button variant="outline" data-autofocus disabled={busy} onClick={onClose}>
             انصراف
@@ -562,6 +595,12 @@ function CookieImportDialog({
             }
           />
         </Field>
+        {verifying && (
+          <p className="text-xs text-muted-foreground">
+            در حال تأیید زنده در برابر سرویس از طریق تونل… این مرحله ممکن است چند
+            ثانیه تا چند دقیقه طول بکشد.
+          </p>
+        )}
         {err && <p className="text-xs font-medium text-destructive">{err}</p>}
         <button
           type="button"

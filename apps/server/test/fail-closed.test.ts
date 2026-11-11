@@ -179,6 +179,86 @@ describe("stale health self-heal (selectAuto)", () => {
   });
 });
 
+describe("parallel self-heal (selectAuto)", () => {
+  /** Wrap runHealthCheck to record call order and peak concurrency. */
+  function trackHealthChecks(): { calls: string[]; peak: () => number } {
+    const calls: string[] = [];
+    let inFlight = 0;
+    let peak = 0;
+    const orig = parts.proxyManager.runHealthCheck.bind(parts.proxyManager);
+    parts.proxyManager.runHealthCheck = async (nodeId: string, dest: { host: string; port: number }) => {
+      calls.push(nodeId);
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        return await orig(nodeId, dest);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+    return { calls, peak: () => peak };
+  }
+
+  /** Add `n` stale-healthy nodes (past the 10-min TTL) with priorities 10.. */
+  function addStaleNodes(n: number): { id: string }[] {
+    const out: { id: string }[] = [];
+    for (let i = 1; i <= n; i++) {
+      const node = addNode(parts.proxies, parts.vault, `n${i}`, 10 * i);
+      markStaleHealthy(parts.proxies, node.id);
+      out.push(node);
+    }
+    return out;
+  }
+
+  it("checks stale nodes in parallel batches (concurrency 4) and short-circuits on a fast-ok", async () => {
+    parts = makeParts();
+    const nodes = addStaleNodes(6); // batch 1 = n1..n4, batch 2 = n5..n6
+    const staleBefore = nodes.map((n) => parts.proxies.health(n.id)!.lastCheckedAt);
+    const t = trackHealthChecks();
+
+    const sel = await parts.proxyManager.selectAuto(null);
+
+    // The first batch ran 4 checks truly in parallel...
+    expect(t.peak()).toBe(4);
+    // ...and its fast-ok short-circuted batch 2: only 4 checks ran at all.
+    expect(t.calls).toHaveLength(4);
+    // All 4 in batch 1 are fast-ok; the highest-priority one (n1) wins.
+    expect(sel.node.id).toBe(nodes[0]!.id);
+    // Batch-2 nodes were never re-checked: their health rows are untouched.
+    for (let i = 4; i < 6; i++) {
+      expect(parts.proxies.health(nodes[i]!.id)!.lastCheckedAt).toBe(staleBefore[i]);
+    }
+    noDirectEgress();
+  });
+
+  it("continues to the next batch when batch 1 has no fast-ok", async () => {
+    parts = makeParts();
+    const nodes = addStaleNodes(5);
+    for (const n of nodes.slice(0, 4)) parts.runtime.setScenario(n.id, "timeout"); // batch 1 dead
+    const t = trackHealthChecks();
+
+    const sel = await parts.proxyManager.selectAuto(null);
+
+    // No fast-ok in batch 1 -> batch 2 (n5) was checked too; all 5 ran.
+    expect(t.calls).toHaveLength(5);
+    expect(sel.node.id).toBe(nodes[4]!.id);
+    noDirectEgress();
+  });
+
+  it("throws a combined fail-closed error when every node fails", async () => {
+    parts = makeParts();
+    const nodes = addStaleNodes(3);
+    for (const n of nodes) parts.runtime.setScenario(n.id, "timeout");
+    const t = trackHealthChecks();
+
+    await expect(parts.proxyManager.selectAuto(null)).rejects.toThrow(
+      /proxy route unhealthy \(fail-closed\): n1: .* \| n2: .* \| n3: .*/s,
+    );
+    expect(t.calls).toHaveLength(3);
+    noDirectEgress();
+  });
+});
+
 describe("fail-closed egress (scenario 8): fallback node down", () => {
   it("select() prefers the healthy fallback node", async () => {
     parts = makeParts();
