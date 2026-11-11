@@ -11,6 +11,7 @@
 services:
   nlo:
     build: .
+    image: nlo
     container_name: nlo
     restart: unless-stopped
     # Run as your host uid/gid so the bind-mounted ./data stays writable
@@ -53,3 +54,22 @@ services:
       NLO_TRUSTED_IPS: ${NLO_TRUSTED_IPS:-172.17.0.1}
     # Outbound internet is needed for live mode (xray tunnel to VLESS nodes).
     # Mock mode works fully offline.
+
+  # Public Bale bot (@nlo_assistant_bot, apps/bot): long-polls Bale and talks
+  # to the job API above — OUTBOUND ONLY, so it publishes no ports. It reuses
+  # the `nlo` image with a different entrypoint. The Bale token and the API
+  # key are secrets: put NLO_BOT_TOKEN / NLO_BOT_API_KEY in this project's
+  # .env (0600) — they are never baked into the image.
+  nlo-bot:
+    image: nlo
+    container_name: nlo-bot
+    restart: unless-stopped
+    command: ["npx", "tsx", "apps/bot/src/bot.ts"]
+    environment:
+      # Compose service name, not the host loopback: container-to-container.
+      NLO_BOT_API_BASE: http://nlo:4870
+      NLO_BOT_TOKEN: ${NLO_BOT_TOKEN:?NLO_BOT_TOKEN is required (Bale bot token)}
+      NLO_BOT_API_KEY: ${NLO_BOT_API_KEY:?NLO_BOT_API_KEY is required (create it in the admin UI)}
+      NLO_BOT_PUBLIC_BASE_URL: ${NLO_BOT_PUBLIC_BASE_URL:-}
+    depends_on:
+      - nlo

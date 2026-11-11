@@ -1,0 +1,22 @@
+{
+  "name": "@nlo/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/bot.ts",
+  "scripts": {
+    "dev": "tsx watch src/bot.ts",
+    "start": "tsx src/bot.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nlo/shared": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
