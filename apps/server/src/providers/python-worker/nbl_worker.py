@@ -102,6 +102,31 @@ def _classify(exc: BaseException) -> tuple[str, str]:
         return code("configuration", str(exc))
     if isinstance(exc, ServerError):
         return code("provider", str(exc))
+
+    # Raw transport failures that notebooklm-py did NOT wrap into its own
+    # exception types. Observed live: an httpx.ReadTimeout escaping rpc_call
+    # (the heavy ListRecentlyViewedProjects read stalls through a flaky
+    # tunnel) reaches _classify unwrapped. These are NBL-destination failures
+    # THROUGH the node's tunnel, so they must classify as "connectivity" —
+    # the only class that triggers verify failover (try the next node) and
+    # node quarantine / auto-delete accounting. The old default ("unknown")
+    # silently disabled the whole failover mechanism for exactly this case.
+    try:
+        import httpx  # noqa: PLC0415 - transport dep, present with notebooklm-py
+
+        if isinstance(exc, (httpx.TimeoutException, httpx.RequestError)):
+            return code("connectivity", f"{type(exc).__name__}: {exc}".strip())
+    except ImportError:
+        pass
+
+    import socket  # noqa: PLC0415 - built-in network-family fallback
+
+    # TimeoutError (== asyncio.TimeoutError / socket.timeout on 3.10+),
+    # ConnectionError and DNS failures: all route-level, all the node's fault.
+    # WaitTimeoutError already matched above, so it keeps its "timeout" class.
+    if isinstance(exc, (TimeoutError, ConnectionError, socket.gaierror)):
+        return code("connectivity", f"{type(exc).__name__}: {exc}".strip())
+
     return "unknown", f"{type(exc).__name__}: {exc}"
 
 
