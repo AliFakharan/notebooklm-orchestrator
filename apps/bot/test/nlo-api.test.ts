@@ -191,4 +191,55 @@ describe("NloApi", () => {
     expect(err).toBeInstanceOf(NloApiError);
     expect((err as NloApiError).status).toBe(502);
   });
+
+  it("lists auth sessions via GET /api/sessions", async () => {
+    requests.length = 0;
+    handler = (_q, res) =>
+      json(res, 200, {
+        provider: "python-worker",
+        interactiveLogin: false,
+        sessions: [
+          {
+            accountId: "acc1",
+            account: { id: "acc1", label: "fakhar", enabled: true, displayEmail: "a@b.c" },
+            session: { state: "AUTHENTICATED", email: "a@b.c" },
+            sessionUsable: true,
+            hasStoredFile: true,
+          },
+        ],
+      });
+    const r = await api().listSessions();
+    expect(r.sessions[0]!.accountId).toBe("acc1");
+    expect(requests[requests.length - 1]!.url).toBe("/api/sessions");
+    expect(requests[requests.length - 1]!.method).toBe("GET");
+  });
+
+  it("imports cookies via POST /api/sessions/:id/import (json body)", async () => {
+    requests.length = 0;
+    handler = (_q, res) => json(res, 202, { status: "accepted" });
+    const r = await api().importCookies("acc1", "SID=abc; HSID=def");
+    expect(r).toEqual({ status: "accepted" });
+    const last = requests[requests.length - 1]!;
+    expect(last.url).toBe("/api/sessions/acc1/import");
+    expect(last.method).toBe("POST");
+    expect(last.headers["content-type"]).toBe("application/json");
+    expect(last.body.toString("utf8")).toBe(JSON.stringify({ cookies: "SID=abc; HSID=def" }));
+  });
+
+  it("encodes the account id in the import path", async () => {
+    requests.length = 0;
+    handler = (_q, res) => json(res, 202, { status: "accepted" });
+    await api().importCookies("a/b", "x");
+    expect(requests[requests.length - 1]!.url).toBe("/api/sessions/a%2Fb/import");
+  });
+
+  it("polls import status via GET /api/sessions/:id/import-status", async () => {
+    requests.length = 0;
+    handler = (_q, res) =>
+      json(res, 200, { state: "AUTHENTICATED", email: "a@b.c", lastError: null });
+    const r = await api().importStatus("acc1");
+    expect(r).toEqual({ state: "AUTHENTICATED", email: "a@b.c", lastError: null });
+    expect(requests[requests.length - 1]!.url).toBe("/api/sessions/acc1/import-status");
+    expect(requests[requests.length - 1]!.method).toBe("GET");
+  });
 });

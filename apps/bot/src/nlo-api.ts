@@ -22,6 +22,26 @@ export interface BotJobSummary {
   createdAt: string;
 }
 
+/** One entry of GET /api/sessions — the fields the bot reads. */
+export interface BotSessionView {
+  accountId: string;
+  account: {
+    id: string;
+    label: string;
+    enabled: boolean;
+    displayEmail: string | null;
+  };
+  session: { state: string; email: string | null; lastError?: string | null } | null;
+  sessionUsable: boolean;
+  hasStoredFile: boolean;
+}
+
+export interface BotImportStatus {
+  state: string;
+  email: string | null;
+  lastError: string | null;
+}
+
 export class NloApiError extends Error {
   constructor(
     message: string,
@@ -140,6 +160,29 @@ export class NloApi {
   /** POST /api/jobs/:id/cancel → {ok, cancelled, status, note?}. */
   async cancelJob(id: string): Promise<{ ok: boolean; cancelled: boolean; status: string; note?: string }> {
     return this.request(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }, SIMPLE_TIMEOUT_MS);
+  }
+
+  /** GET /api/sessions → one view per account (id, state, email, usability). */
+  async listSessions(): Promise<{ provider: string; sessions: BotSessionView[] }> {
+    return this.request("/api/sessions", { method: "GET" }, SIMPLE_TIMEOUT_MS);
+  }
+
+  /**
+   * POST /api/sessions/:id/import → 202 {status:"accepted"}. The service
+   * verification runs in the background; poll importStatus until the state
+   * leaves AUTH_IN_PROGRESS.
+   */
+  async importCookies(accountId: string, cookies: string): Promise<{ status: string }> {
+    return this.request(`/api/sessions/${encodeURIComponent(accountId)}/import`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cookies }),
+    }, SIMPLE_TIMEOUT_MS);
+  }
+
+  /** GET /api/sessions/:id/import-status → {state, email, lastError}. */
+  async importStatus(accountId: string): Promise<BotImportStatus> {
+    return this.request(`/api/sessions/${encodeURIComponent(accountId)}/import-status`, { method: "GET" }, SIMPLE_TIMEOUT_MS);
   }
 }
 

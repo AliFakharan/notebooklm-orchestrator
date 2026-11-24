@@ -39,6 +39,9 @@ services:
       NLO_PORT: "4870"
       NLO_PROVIDER: ${NLO_PROVIDER:-mock}
       NLO_PROXY_RUNTIME: ${NLO_PROXY_RUNTIME:-mock}
+      # Direct egress for proxy-less deployments (auth ops + jobs run without
+      # a tunnel). Set to 1 in .env only when you intend NO proxy nodes.
+      NLO_ALLOW_DIRECT_EGRESS: ${NLO_ALLOW_DIRECT_EGRESS:-0}
       # Pin to the venv baked into the image (/opt/nbl-venv). Do NOT interpolate
       # NLO_PYTHON_BIN here: in bare mode your .env points at a HOST path
       # (e.g. /home/.../data/venv/bin/python) which does not exist inside the
@@ -52,6 +55,14 @@ services:
       # Where host-browser requests arrive from inside the container
       # (default docker bridge gateway); keeps the public web UI working.
       NLO_TRUSTED_IPS: ${NLO_TRUSTED_IPS:-172.17.0.1}
+      # Reverse-proxy UI marker (Caddy sets it on the public UI site and
+      # strips it on the API site) — makes the browser UI public while the
+      # direct API stays key-gated. Off unless set in .env.
+      NLO_UI_MARKER_HEADER: ${NLO_UI_MARKER_HEADER:-}
+      # Bale alert bot (cookie-expiry / recovery / infra pushes, see
+      # apps/server/src/notify/bale.ts). Off unless set in .env.
+      NLO_BALE_BOT_TOKEN: ${NLO_BALE_BOT_TOKEN:-}
+      NLO_BALE_CHAT_ID: ${NLO_BALE_CHAT_ID:-}
     # Outbound internet is needed for live mode (xray tunnel to VLESS nodes).
     # Mock mode works fully offline.
 
@@ -65,11 +76,14 @@ services:
     container_name: nlo-bot
     restart: unless-stopped
     command: ["npx", "tsx", "apps/bot/src/bot.ts"]
+    # The image healthcheck probes 4870 (the server); the bot exposes no port
+    # and runs a long-polling client, so disable it for this service.
+    healthcheck:
+      test: ["NONE"]
     environment:
       # Compose service name, not the host loopback: container-to-container.
       NLO_BOT_API_BASE: http://nlo:4870
       NLO_BOT_TOKEN: ${NLO_BOT_TOKEN:?NLO_BOT_TOKEN is required (Bale bot token)}
       NLO_BOT_API_KEY: ${NLO_BOT_API_KEY:?NLO_BOT_API_KEY is required (create it in the admin UI)}
-      NLO_BOT_PUBLIC_BASE_URL: ${NLO_BOT_PUBLIC_BASE_URL:-}
     depends_on:
       - nlo

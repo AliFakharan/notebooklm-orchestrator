@@ -220,7 +220,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
   );
 }
 
-const PROTECTED_PREFIXES = ["/api/accounts", "/api/proxies", "/api/sessions", "/api/api-keys"];
+// /api/sessions is NOT admin-gated: it is key-gated by guardJobApiRoutes
+// (api-key-auth.ts) so the Bale bot can import/verify Google cookies.
+const PROTECTED_PREFIXES = ["/api/accounts", "/api/proxies", "/api/api-keys"];
 
 function isProtected(url: string): boolean {
   return PROTECTED_PREFIXES.some((p) => url === p || url.startsWith(`${p}/`));

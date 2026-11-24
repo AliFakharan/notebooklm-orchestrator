@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -34,10 +34,14 @@ import {
   type SourceFile,
 } from "./flow.js";
 import { makeFetch } from "./http.js";
-import { NloApi, NloApiError, type BotJobSummary } from "./nlo-api.js";
+import { NloApi, NloApiError, type BotImportStatus, type BotJobSummary } from "./nlo-api.js";
 
 const log = (m: string): void => console.log(`[nlo:bot] ${m}`);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Max time to wait for the background cookie verification to finish. */
+const COOKIE_IMPORT_WAIT_MS = 90_000;
+const COOKIE_POLL_MS = 3_000;
 
 async function main(): Promise<void> {
   loadBotDotEnv();
@@ -64,6 +68,7 @@ async function main(): Promise<void> {
   await bale.setMyCommands([
     { command: "start", description: "شروع" },
     { command: "help", description: "راهنما" },
+    { command: "cookie", description: "به‌روزرسانی کوکی گوگل" },
     { command: "cancel", description: "لغو جاب جاری" },
   ]);
 
@@ -153,7 +158,72 @@ async function main(): Promise<void> {
           log(`chat ${chatId}: cancelJob failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      return;
     }
+    if (a.type === "importCookies") {
+      send(chatId, botMessages.cookieAccepted);
+      try {
+        const { sessions } = await api.listSessions();
+        const view = sessions.find((s) => s.account?.enabled) ?? sessions[0];
+        if (!view) {
+          flows.cookieDone(chatId);
+          send(chatId, botMessages.cookieNoAccount);
+          log(`chat ${chatId}: importCookies — no account registered`);
+          return;
+        }
+        const accountId = view.accountId;
+        await api.importCookies(accountId, a.text);
+        const status = await waitForCookieImport(api, accountId);
+        flows.cookieDone(chatId);
+        if (status.state === "AUTHENTICATED") {
+          send(chatId, botMessages.cookieOk(status.email ?? view.account.displayEmail ?? "اکانت"));
+          log(`chat ${chatId}: cookie import ok (${status.email ?? view.account.displayEmail ?? accountId})`);
+        } else if (status.state === "AUTH_REQUIRED") {
+          send(chatId, botMessages.cookieRejected(status.lastError ?? ""));
+          log(`chat ${chatId}: cookie import rejected: ${status.lastError ?? "no reason"}`);
+        } else if (status.state === "SESSION_INVALID") {
+          send(chatId, botMessages.cookieMismatch);
+          log(`chat ${chatId}: cookie import identity mismatch`);
+        } else {
+          send(chatId, botMessages.cookieTimeout);
+          log(`chat ${chatId}: cookie import still ${status.state} after wait`);
+        }
+      } catch (e) {
+        flows.cookieDone(chatId);
+        if (e instanceof NloApiError) {
+          if (e.unreachable) send(chatId, botMessages.apiDown);
+          else if (e.status === 401 || e.status === 403) send(chatId, botMessages.authBad);
+          else send(chatId, `⚠️ ${e.message}`);
+          log(`chat ${chatId}: importCookies failed (HTTP ${e.status})`);
+        } else {
+          send(chatId, botMessages.apiDown);
+          log(`chat ${chatId}: importCookies failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  };
+
+  /**
+   * Poll import-status until the state leaves AUTH_IN_PROGRESS (or the wait
+   * budget is exhausted). Returns the last observed status.
+   */
+  const waitForCookieImport = async (
+    api: NloApi,
+    accountId: string,
+  ): Promise<BotImportStatus> => {
+    const deadline = Date.now() + COOKIE_IMPORT_WAIT_MS;
+    let status: BotImportStatus = { state: "AUTH_IN_PROGRESS", email: null, lastError: null };
+    while (Date.now() < deadline) {
+      await sleep(COOKIE_POLL_MS);
+      try {
+        status = await api.importStatus(accountId);
+      } catch (e) {
+        log(`cookie import-status poll failed: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      if (status.state !== "AUTH_IN_PROGRESS") return status;
+    }
+    return status;
   };
 
   // --- job result delivery ---------------------------------------------------
@@ -226,6 +296,8 @@ async function main(): Promise<void> {
           for (const a of flows.handleStart(chatId)) await exec(chatId, a);
         } else if (base === "/help") {
           for (const a of flows.handleHelp(chatId)) await exec(chatId, a);
+        } else if (base === "/cookie") {
+          for (const a of flows.handleCookieCommand(chatId)) await exec(chatId, a);
         } else if (base === "/cancel") {
           for (const a of flows.handleCancel(chatId)) await exec(chatId, a);
         } else {
@@ -236,6 +308,27 @@ async function main(): Promise<void> {
 
       const attachments = extractAttachments(m);
       if (attachments.length > 0) {
+        // Cookie flow: a document file is the raw cookie payload (bypass the
+        // source-extension mapping, which rejects .json).
+        if (flows.peekState(chatId) === "WAIT_COOKIE") {
+          const doc = attachments.find((x) => x.kind === "document");
+          if (!doc) {
+            send(chatId, botMessages.cookieFileOnly);
+            return;
+          }
+          const p = path.join(tmpDir, `${chatId}-${randomUUID()}`);
+          try {
+            await bale.downloadFile(doc.ref.file_id, p);
+            const text = await readFile(p, "utf8");
+            for (const a of flows.handleText(chatId, text)) await exec(chatId, a);
+          } catch (e) {
+            send(chatId, botMessages.downloadFailed);
+            log(`chat ${chatId}: cookie file download failed: ${e instanceof Error ? e.message : String(e)}`);
+          } finally {
+            rmSync(p, { force: true });
+          }
+          return;
+        }
         // Map first (cheap failures before any download).
         const mapped: { ref: BaleFileRef; filename: string; contentType: string }[] = [];
         const errors = new Set<string>();

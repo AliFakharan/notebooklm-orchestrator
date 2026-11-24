@@ -181,3 +181,51 @@ describe("flow state machine", () => {
     expect(f.sources.length).toBe(3);
   });
 });
+
+describe("cookie flow (/cookie)", () => {
+  it("enters WAIT_COOKIE via /cookie and prompts for the cookie", () => {
+    const { fm } = setup();
+    expect(fm.handleCookieCommand(1)).toEqual([{ type: "send", text: botMessages.cookiePrompt }]);
+    expect(fm.peekState(1)).toBe("WAIT_COOKIE");
+  });
+
+  it("returns an importCookies action when text arrives in WAIT_COOKIE", () => {
+    const { fm } = setup();
+    fm.handleCookieCommand(1);
+    expect(fm.handleText(1, "SID=abc; HSID=def")).toEqual([
+      { type: "importCookies", text: "SID=abc; HSID=def" },
+    ]);
+    // state stays WAIT_COOKIE until the import resolves (cookieDone resets it)
+    expect(fm.peekState(1)).toBe("WAIT_COOKIE");
+    fm.cookieDone(1);
+    expect(fm.peekState(1)).toBe("IDLE");
+  });
+
+  it("rejects an empty cookie payload with a hint", () => {
+    const { fm } = setup();
+    fm.handleCookieCommand(1);
+    expect(fm.handleText(1, "   ")).toEqual([{ type: "send", text: botMessages.cookieFileOnly }]);
+  });
+
+  it("cancels the cookie flow back to IDLE", () => {
+    const { fm } = setup();
+    fm.handleCookieCommand(1);
+    expect(fm.handleCancel(1)).toEqual([{ type: "send", text: botMessages.cancelledFlow }]);
+    expect(fm.peekState(1)).toBe("IDLE");
+  });
+
+  it("refuses /cookie while a job is in flight", () => {
+    const { fm, runToJob } = setup();
+    runToJob(1);
+    fm.markSubmitted(1, "j1");
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+    expect(fm.handleCookieCommand(1)).toEqual([{ type: "send", text: botMessages.busy }]);
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+  });
+
+  it("answers stray files in WAIT_COOKIE with the cookie hint (handled upstream)", () => {
+    const { fm, file } = setup();
+    fm.handleCookieCommand(1);
+    expect(fm.handleSource(1, [file(1)])).toEqual([{ type: "send", text: botMessages.cookieFileOnly }]);
+  });
+});

@@ -28,6 +28,8 @@ describe("job-surface gate", () => {
   let adminApp: FastifyInstance;
   let trustedCtx: AppContext;
   let trustedApp: FastifyInstance;
+  let markerCtx: AppContext;
+  let markerApp: FastifyInstance;
 
   beforeEach(async () => {
     ctx = await makeAppContext({});
@@ -41,6 +43,15 @@ describe("job-surface gate", () => {
     trustedCtx = await makeAppContext({ NLO_TRUSTED_IPS: FOREIGN });
     trustedApp = await buildApp(trustedCtx);
     await trustedApp.ready();
+
+    // Admin-gated app with the reverse-proxy UI marker configured.
+    markerCtx = await makeAppContext({
+      NLO_ADMIN_USER: ADMIN_USER,
+      NLO_ADMIN_PASSWORD: ADMIN_PASS,
+      NLO_UI_MARKER_HEADER: "X-NLO-UI",
+    });
+    markerApp = await buildApp(markerCtx);
+    await markerApp.ready();
   });
 
   afterEach(async () => {
@@ -50,6 +61,8 @@ describe("job-surface gate", () => {
     await adminCtx.close();
     await trustedApp.close();
     await trustedCtx.close();
+    await markerApp.close();
+    await markerCtx.close();
   });
 
   it("loopback needs no credentials (existing behavior preserved)", async () => {
@@ -133,6 +146,48 @@ describe("job-surface gate", () => {
     ).toBe(200);
   });
 
+  it("accepts a foreign caller carrying the configured UI marker (public UI via proxy)", async () => {
+    const res = await markerApp.inject({
+      method: "GET",
+      url: "/api/jobs",
+      remoteAddress: FOREIGN,
+      headers: { "x-nlo-ui": "1" },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("rejects a foreign caller with a wrong or appended marker value", async () => {
+    for (const v of ["0", "evil", "1,evil", "evil,1"]) {
+      const res = await markerApp.inject({
+        method: "GET",
+        url: "/api/jobs",
+        remoteAddress: FOREIGN,
+        headers: { "x-nlo-ui": v },
+      });
+      expect(res.statusCode).toBe(401);
+    }
+  });
+
+  it("ignores the marker header when NLO_UI_MARKER_HEADER is not configured", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/jobs",
+      remoteAddress: FOREIGN,
+      headers: { "x-nlo-ui": "1" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("the UI marker does NOT open the infrastructure API", async () => {
+    const res = await markerApp.inject({
+      method: "GET",
+      url: "/api/accounts",
+      remoteAddress: FOREIGN,
+      headers: { "x-nlo-ui": "1" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
   it("keeps /api/health open to non-loopback callers", async () => {
     expect(
       (await app.inject({ method: "GET", url: "/api/health", remoteAddress: FOREIGN })).statusCode,
@@ -149,6 +204,24 @@ describe("job-surface gate", () => {
       headers: { authorization: `Bearer ${k.raw}` },
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("a job key DOES open /api/sessions (Bale bot cookie import)", async () => {
+    const k = ctx.apiKeys.create("bot");
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/sessions",
+      remoteAddress: FOREIGN,
+      headers: { authorization: `Bearer ${k.raw}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveProperty("sessions");
+  });
+
+  it("rejects /api/sessions from a foreign caller without credentials", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/sessions", remoteAddress: FOREIGN });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: { code: "unauthorized", message: "api key required" } });
   });
 });
 

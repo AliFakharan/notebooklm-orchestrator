@@ -5,6 +5,8 @@
  *  IDLE → (file/text as source) → WAIT_TITLE → WAIT_PROMPT → SUBMITTED → IDLE
  *  /start puts a chat into WAIT_SOURCE (welcome); IDLE and WAIT_SOURCE both
  *  accept a file/text as the job's source.
+ *  /cookie puts a chat into WAIT_COOKIE; the next file/text is treated as the
+ *  raw Google cookie text and returned as an importCookies action.
  *
  * The flow never touches the network or the filesystem: it returns FlowAction
  * values that the entrypoint (bot.ts) executes, and carries SourceFile
@@ -19,7 +21,13 @@ import {
 } from "@nlo/shared";
 import type { BalePhotoSize } from "./bale.js";
 
-export type FlowState = "IDLE" | "WAIT_SOURCE" | "WAIT_TITLE" | "WAIT_PROMPT" | "SUBMITTED";
+export type FlowState =
+  | "IDLE"
+  | "WAIT_SOURCE"
+  | "WAIT_TITLE"
+  | "WAIT_PROMPT"
+  | "SUBMITTED"
+  | "WAIT_COOKIE";
 
 export interface SourceFile {
   /** Temp file on disk (bot-owned; cleaned up by bot.ts). */
@@ -33,7 +41,8 @@ export interface SourceFile {
 export type FlowAction =
   | { type: "send"; text: string }
   | { type: "createJob"; title: string | null; prompt: string; sources: SourceFile[] }
-  | { type: "cancelJob"; jobId: string };
+  | { type: "cancelJob"; jobId: string }
+  | { type: "importCookies"; text: string };
 
 export interface Flow {
   chatId: number;
@@ -66,7 +75,7 @@ export const botMessages = {
   welcome:
     "سلام! 👋\nمن دستیار NLO هستم.\nفایل یا متنت را بفرست، بعد عنوان و سوال/دستورت را بنویس تا برایت کار کنم.\n\n📖 /help راهنما\n✋ /cancel لغو",
   help:
-    "راهنما:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم.\n\n✋ /cancel — لغو جاب جاری",
+    "راهنما:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم.\n\n🍪 /cookie — به‌روزرسانی کوکی گوگل (وقتی لاگین منقضی شد)\n✋ /cancel — لغو جاب جاری",
   hintSource: "📎 حالا فایل یا 📝 متن خودت را بفرست.",
   onlyFileOrText: "فقط فایل یا متن را می‌فهمم. /help برای راهنما.",
   privateOnly: "فقط در گفتگوی خصوصی کار می‌کنم.",
@@ -93,6 +102,15 @@ export const botMessages = {
   tooManyFiles: `حداکثر ${MAX_SOURCES_PER_JOB} فایل در هر جاب.`,
   needsAttention: "⚠️ جاب به بررسی نیاز دارد؛ در پنل مدیریت بررسی کن.",
   jobTimeout: "جاب بیش از حد مجاز طول کشید؛ در پنل مدیریت بررسی کن.",
+  cookiePrompt:
+    "🍪 کوکی گوگل را برای NotebookLM بفرست.\nبهترین راه: کوکی‌ها را به‌صورت فایل (JSON یا TXT) از مرورگر export کن و همین فایل را اینجا بفرست. (می‌توانی متن کوکی را هم مستقیم paste کنی.)\n\n✋ /cancel — انصراف",
+  cookieFileOnly: "لطفاً کوکی را به‌صورت فایل (JSON/TXT) یا متن بفرست.",
+  cookieAccepted: "✅ کوکی دریافت شد؛ در حال بررسی با سرویس…",
+  cookieOk: (email: string) => `✅ کوکی معتبر است. اکانت ${email} فعال شد.`,
+  cookieRejected: (reason: string) => `⚠️ کوکی توسط سرویس رد شد.${reason ? ` (${reason})` : ""}\nلطفاً دوباره از مرورگر لاگین‌شده export کن و بفرست.`,
+  cookieMismatch: "⚠️ هویت در کوکی با اکانت ثبت‌شده مطابقت ندارد.",
+  cookieTimeout: "⚠️ بررسی کوکی بیش از حد طول کشید؛ دوباره /cookie بزن.",
+  cookieNoAccount: "⚠️ اکانتی روی سرور ثبت نشده است.",
 } as const;
 
 const FAILED_MESSAGES: Record<FailureClass, string> = {
@@ -206,10 +224,19 @@ export class FlowManager {
     return [{ type: "send", text: botMessages.help }];
   }
 
+  /** /cookie — start the cookie import flow (unless a job is in flight). */
+  handleCookieCommand(chatId: number): FlowAction[] {
+    const f = this.flowFor(chatId);
+    if (f.state === "SUBMITTED" && f.jobId) return [{ type: "send", text: botMessages.busy }];
+    this.resetToIdle(f);
+    f.state = "WAIT_COOKIE";
+    return [{ type: "send", text: botMessages.cookiePrompt }];
+  }
+
   /**
    * /cancel — by state:
    *  IDLE/WAIT_SOURCE → nothing to cancel
-   *  WAIT_TITLE/WAIT_PROMPT → drop the flow
+   *  WAIT_TITLE/WAIT_PROMPT/WAIT_COOKIE → drop the flow
    *  SUBMITTED → cancelJob action (bot.ts posts /cancel to the API)
    */
   handleCancel(chatId: number): FlowAction[] {
@@ -220,6 +247,7 @@ export class FlowManager {
         return [{ type: "send", text: botMessages.cancelIdle }];
       case "WAIT_TITLE":
       case "WAIT_PROMPT":
+      case "WAIT_COOKIE":
         this.resetToIdle(f);
         return [{ type: "send", text: botMessages.cancelledFlow }];
       case "SUBMITTED": {
@@ -243,6 +271,13 @@ export class FlowManager {
   jobDone(chatId: number): void {
     const f = this.flowFor(chatId);
     if (f.state !== "SUBMITTED") return;
+    this.resetToIdle(f);
+  }
+
+  /** Leave WAIT_COOKIE after the import finished (success or failure). */
+  cookieDone(chatId: number): void {
+    const f = this.flowFor(chatId);
+    if (f.state !== "WAIT_COOKIE") return;
     this.resetToIdle(f);
   }
 
@@ -276,6 +311,9 @@ export class FlowManager {
         return [{ type: "send", text: botMessages.titleTextOnly }];
       case "WAIT_PROMPT":
         return [{ type: "send", text: botMessages.promptTextOnly }];
+      case "WAIT_COOKIE":
+        // Cookie files are handled by bot.ts before reaching here.
+        return [{ type: "send", text: botMessages.cookieFileOnly }];
       case "SUBMITTED":
         return [{ type: "send", text: botMessages.busy }];
     }
@@ -283,8 +321,9 @@ export class FlowManager {
 
   /**
    * A plain-text message that is NOT a source (WAIT_TITLE / WAIT_PROMPT /
-   * SUBMITTED). IDLE/WAIT_SOURCE should not receive text here (the caller
-   * routes text-as-source first) — the hint is a defensive fallback.
+   * WAIT_COOKIE / SUBMITTED). IDLE/WAIT_SOURCE should not receive text here
+   * (the caller routes text-as-source first) — the hint is a defensive
+   * fallback. In WAIT_COOKIE the text IS the raw cookie payload.
    */
   handleText(chatId: number, text: string): FlowAction[] {
     const f = this.flowFor(chatId);
@@ -293,6 +332,11 @@ export class FlowManager {
       case "IDLE":
       case "WAIT_SOURCE":
         return [{ type: "send", text: botMessages.hintSource }];
+      case "WAIT_COOKIE": {
+        if (!trimmed) return [{ type: "send", text: botMessages.cookieFileOnly }];
+        f.updatedAt = this.now();
+        return [{ type: "importCookies", text: trimmed }];
+      }
       case "WAIT_TITLE": {
         if (!trimmed) return [{ type: "send", text: botMessages.askTitle }];
         if (trimmed.length > this.maxTitleChars) {
@@ -321,6 +365,7 @@ export class FlowManager {
     const f = this.flowFor(chatId);
     f.updatedAt = this.now();
     if (f.state === "SUBMITTED") return [{ type: "send", text: botMessages.busy }];
+    if (f.state === "WAIT_COOKIE") return [{ type: "send", text: botMessages.cookieFileOnly }];
     return [{ type: "send", text: botMessages.onlyFileOrText }];
   }
 
