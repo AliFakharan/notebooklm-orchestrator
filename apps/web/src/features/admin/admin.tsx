@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
 import { Cable, KeyRound, LockKeyhole, Users } from "lucide-react";
-import { adminLogin, adminMe, type AdminStatus } from "@/lib/api";
+import { adminLogin, adminMe, healthReady, type AdminStatus } from "@/lib/api";
 import { AppShell, type NavItem } from "@/app/app-layout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,17 @@ import { ProxiesPage } from "@/features/proxies/proxies";
  * «زیرساخت» group (حساب‌ها / پراکسی‌ها) instead of «کار اصلی», and there is
  * no link to it anywhere in the public UI — the only way in is the URL.
  */
+const PROXIES_NAV: NavItem = {
+  to: "/admin/proxies",
+  label: "پراکسی‌ها",
+  icon: Cable,
+  end: true,
+  group: "زیرساخت",
+};
+
 const ADMIN_NAV: NavItem[] = [
   { to: "/admin/accounts", label: "حساب‌ها", icon: Users, end: true, group: "زیرساخت" },
-  { to: "/admin/proxies", label: "پراکسی‌ها", icon: Cable, end: true, group: "زیرساخت" },
+  PROXIES_NAV,
   { to: "/admin/api-keys", label: "کلیدهای API", icon: KeyRound, end: true, group: "زیرساخت" },
 ];
 
@@ -29,9 +37,23 @@ function adminTitle(path: string): string {
   return "ورود به بخش زیرساخت";
 }
 
-/** Layout route for the whole /admin section (same look as the public app). */
+/**
+ * Layout route for the whole /admin section (same look as the public app).
+ * The «پراکسی‌ها» item appears only when the server actually runs the xray
+ * proxy runtime — in proxy-less deployments (mock runtime) it would be dead
+ * weight, so it stays hidden until the runtime says otherwise.
+ */
 export function AdminShell() {
-  return <AppShell nav={ADMIN_NAV} titleFor={adminTitle} />;
+  const [showProxies, setShowProxies] = useState(false);
+
+  useEffect(() => {
+    healthReady()
+      .then((r) => setShowProxies(r.proxyRuntime.name === "xray"))
+      .catch(() => {});
+  }, []);
+
+  const nav = showProxies ? ADMIN_NAV : ADMIN_NAV.filter((n) => n.to !== "/admin/proxies");
+  return <AppShell nav={nav} titleFor={adminTitle} />;
 }
 
 /**

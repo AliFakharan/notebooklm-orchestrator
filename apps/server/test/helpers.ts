@@ -10,9 +10,10 @@ import { ProxiesRepo } from "../src/domain/proxies.repo.js";
 import { SecretVault } from "../src/secrets/vault.js";
 import { MockProvider } from "../src/providers/mock-provider.js";
 import { MockProxyRuntime } from "../src/proxy/runtime.js";
-import { MockProviderEgress } from "../src/proxy/egress.js";
+import { MockProviderEgress, type ProviderEgress } from "../src/proxy/egress.js";
 import { ProxyManager } from "../src/proxy/proxy-manager.js";
 import { JobRunner } from "../src/queue/job-runner.js";
+import type { TunnelHandle } from "../src/proxy/runtime.js";
 import { safeName, type Job } from "@nlo/shared";
 
 export interface TestParts {
@@ -23,7 +24,7 @@ export interface TestParts {
   proxies: ProxiesRepo;
   jobs: JobsRepo;
   runtime: MockProxyRuntime;
-  egress: MockProviderEgress;
+  egress: ProviderEgress;
   proxyManager: ProxyManager;
   provider: MockProvider;
   runner: JobRunner;
@@ -34,10 +35,51 @@ export interface TestParts {
 const VAULT_KEY = "ab".repeat(32);
 
 /**
+ * Egress for the allow-direct test stack: a null tunnel dials DIRECT (the
+ * python-worker equivalent: child process started without proxy env vars).
+ * A present tunnel is handled exactly like MockProviderEgress (same runtime
+ * scenario semantics), so the healthy-node case stays realistic.
+ */
+class DirectEgressMock extends MockProviderEgress {
+  constructor(
+    dial: (
+      via: TunnelHandle,
+      target: string,
+      body: { method: string; path: string; headers: Record<string, string>; body?: string },
+    ) => Promise<{ status: number; body: string }>,
+    scenarioFor: (nodeId: string) => string,
+    private readonly dialDirect: (
+      target: string,
+    ) => Promise<{ status: number; body: string }>,
+  ) {
+    super(dial, scenarioFor);
+  }
+
+  override async request(
+    tunnel: TunnelHandle | null,
+    target: string,
+    body: { method: string; path: string; headers: Record<string, string>; body?: string },
+  ): Promise<{ status: number; body: string; latencyMs: number }> {
+    if (!tunnel) {
+      const started = Date.now();
+      const res = await this.dialDirect(target);
+      this.attempts.push({ viaTunnel: false, tunnelNodeId: null, target, ok: true });
+      return { ...res, latencyMs: Date.now() - started };
+    }
+    return super.request(tunnel, target, body);
+  }
+}
+
+export interface MakePartsOpts {
+  /** Runner-level allow-direct (NLO_ALLOW_DIRECT_EGRESS=1). */
+  allowDirect?: boolean;
+}
+
+/**
  * Build an isolated in-memory test stack (temp dir, no queue, no network).
  * The egress dial is a stub; the runtime is the deterministic mock.
  */
-export function makeParts(): TestParts {
+export function makeParts(opts: MakePartsOpts = {}): TestParts {
   const dir = mkdtempSync(path.join(tmpdir(), "nlo-test-"));
   const jobsDir = path.join(dir, "jobs");
   const db = Db.open(path.join(dir, "test.sqlite"));
@@ -46,10 +88,17 @@ export function makeParts(): TestParts {
   const proxies = new ProxiesRepo(db);
   const jobs = new JobsRepo(db);
   const runtime = new MockProxyRuntime();
-  const egress = new MockProviderEgress(
-    async (_tunnel, target) => ({ status: 200, body: `mock upstream response for ${target}` }),
-    (nodeId) => runtime.scenario(nodeId),
-  );
+  const mockDial = async (_tunnel: TunnelHandle, target: string) => ({
+    status: 200,
+    body: `mock upstream response for ${target}`,
+  });
+  const egress = opts.allowDirect
+    ? new DirectEgressMock(
+        mockDial,
+        (nodeId) => runtime.scenario(nodeId),
+        async (target) => ({ status: 200, body: `mock direct upstream response for ${target}` }),
+      )
+    : new MockProviderEgress(mockDial, (nodeId) => runtime.scenario(nodeId));
   const proxyManager = new ProxyManager(
     proxies,
     runtime,
@@ -77,6 +126,7 @@ export function makeParts(): TestParts {
     // Instant backoff for fast, deterministic tests.
     sleep: () => Promise.resolve(),
     rng: () => 0,
+    allowDirect: opts.allowDirect,
   });
 
   return {

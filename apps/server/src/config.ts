@@ -29,6 +29,14 @@ export interface AppConfig {
    * credentials — deployment escape hatch, e.g. the Docker bridge gateway.
    */
   trustedIps: string[];
+  /**
+   * Reverse-proxy UI marker (header name, e.g. "X-NLO-UI"): when set, job
+   * surface requests whose header of that name is exactly "1" are treated
+   * as public-UI traffic and allowed without credentials. Only trustworthy
+   * when a proxy the operator controls (Caddy) strips any client-supplied
+   * value and sets it only on the public UI site. Off by default.
+   */
+  uiMarkerHeader: string | null;
   /** Python interpreter for the notebooklm worker (default "python3"). */
   pythonBin: string;
   /**
@@ -180,6 +188,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): App
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    uiMarkerHeader: (env("NLO_UI_MARKER_HEADER") ?? "").trim() || null,
     pythonBin: env("NLO_PYTHON_BIN") ?? "python3",
     jobTimeoutMs: intEnv("NLO_JOB_TIMEOUT_MS", 30 * 60_000),
     allowDirectEgress: boolEnv("NLO_ALLOW_DIRECT_EGRESS", false),

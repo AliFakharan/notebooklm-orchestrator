@@ -205,6 +205,7 @@ export function createAppContext(
       // Structured-ish, redaction is applied at call sites.
       console.log(`[nlo] ${msg}`);
     },
+    allowDirect: config.allowDirectEgress,
   });
 
   const queue = new Queue(runner, 500, (msg) => console.log(`[nlo:queue] ${msg}`));

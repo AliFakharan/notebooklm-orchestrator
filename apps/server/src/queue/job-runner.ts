@@ -51,6 +51,12 @@ export interface JobRunnerDeps {
   log: (msg: string) => void;
   sleep?: (ms: number) => Promise<void>;
   rng?: () => number;
+  /**
+   * When true AND zero enabled proxy nodes exist, the job proceeds with a
+   * null tunnel (direct egress) instead of failing closed. Mirrors the
+   * python-worker provider's acquireAuthTunnel() semantics (NLO_ALLOW_DIRECT_EGRESS=1).
+   */
+  allowDirect?: boolean;
 }
 
 const sleepDefault = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -127,40 +133,56 @@ export class JobRunner {
         this.d.jobs.setStatus(jobId, "WAITING_FOR_PROXY");
         let handle: TunnelHandle | null = null;
         let nodeId: string | null = null;
-        try {
-          // selectAuto() validates (config + fresh healthy check) AND starts
-          // the tunnel; it throws when no node can provide a real route.
-          // When health is merely STALE (10-min TTL passed), it runs the real
-          // staged check against the NotebookLM target first (self-heal), so
-          // a previously-verified node keeps working without manual clicks.
-          const sel = await this.d.proxyManager.selectAuto(
-            this.d.jobs.getOrThrow(jobId).input.preferredNodeId,
-          );
-          nodeId = sel.node.id;
-          handle = sel.handle;
+        if (
+          this.d.allowDirect &&
+          this.d.proxies.list().filter((n) => n.enabled).length === 0
+        ) {
+          // Zero enabled proxy nodes: an explicit, logged configuration
+          // choice (NLO_ALLOW_DIRECT_EGRESS=1) to proceed direct. If ANY
+          // enabled node exists, the fail-closed selectAuto() path below
+          // still applies (unhealthy nodes never fall back to direct).
           this.logEvent(
             jobId,
             archive,
-            "proxy_selected",
-            `node ${sel.node.config.name}; tunnel ${sel.handle.host}:${sel.handle.port} — ${sel.reason}`,
+            "direct_egress",
+            "no proxy node configured; proceeding direct (NLO_ALLOW_DIRECT_EGRESS=1)",
           );
-          for (const r of sel.rejected) {
+        } else {
+          try {
+            // selectAuto() validates (config + fresh healthy check) AND starts
+            // the tunnel; it throws when no node can provide a real route.
+            // When health is merely STALE (10-min TTL passed), it runs the real
+            // staged check against the NotebookLM target first (self-heal), so
+            // a previously-verified node keeps working without manual clicks.
+            const sel = await this.d.proxyManager.selectAuto(
+              this.d.jobs.getOrThrow(jobId).input.preferredNodeId,
+            );
+            nodeId = sel.node.id;
+            handle = sel.handle;
             this.logEvent(
               jobId,
               archive,
-              "proxy_candidate_rejected",
-              `node ${r.nodeId}: ${r.reason}`,
+              "proxy_selected",
+              `node ${sel.node.config.name}; tunnel ${sel.handle.host}:${sel.handle.port} — ${sel.reason}`,
             );
+            for (const r of sel.rejected) {
+              this.logEvent(
+                jobId,
+                archive,
+                "proxy_candidate_rejected",
+                `node ${r.nodeId}: ${r.reason}`,
+              );
+            }
+          } catch (err) {
+            const msg = redact(String(err));
+            this.d.jobs.setStatus(jobId, "FAILED", {
+              errorClass: "proxy",
+              errorMessage: `no approved proxy route available (fail-closed): ${msg}`,
+            });
+            this.logEvent(jobId, archive, "proxy_unavailable", msg);
+            this.finalizeArchive(jobId, archive);
+            return this.d.jobs.getOrThrow(jobId);
           }
-        } catch (err) {
-          const msg = redact(String(err));
-          this.d.jobs.setStatus(jobId, "FAILED", {
-            errorClass: "proxy",
-            errorMessage: `no approved proxy route available (fail-closed): ${msg}`,
-          });
-          this.logEvent(jobId, archive, "proxy_unavailable", msg);
-          this.finalizeArchive(jobId, archive);
-          return this.d.jobs.getOrThrow(jobId);
         }
 
         // --- RUNNING -------------------------------------------------------
