@@ -242,4 +242,68 @@ describe("NloApi", () => {
     expect(requests[requests.length - 1]!.url).toBe("/api/sessions/acc1/import-status");
     expect(requests[requests.length - 1]!.method).toBe("GET");
   });
+
+  it("appends output + language form fields only when present", async () => {
+    requests.length = 0;
+    handler = (_q, res) => json(res, 201, { id: "j9", status: "CREATED" });
+    await api().createJob({ prompt: "p", title: null, files: [], output: "audio", language: "fa" });
+    const body = requests[0]!.body.toString("utf8");
+    expect(body).toContain('name="output"');
+    expect(body).toContain("audio");
+    expect(body).toContain('name="language"');
+    expect(body).toContain("fa");
+  });
+
+  it("omits output + language when absent (backward compatible)", async () => {
+    requests.length = 0;
+    handler = (_q, res) => json(res, 201, { id: "j10", status: "CREATED" });
+    await api().createJob({ prompt: "p", title: null, files: [] });
+    const body = requests[0]!.body.toString("utf8");
+    expect(body).not.toContain('name="output"');
+    expect(body).not.toContain('name="language"');
+  });
+
+  it("lists job artifacts via GET /api/jobs/:id/artifacts", async () => {
+    requests.length = 0;
+    handler = (_q, res) =>
+      json(res, 200, [
+        {
+          id: "art_1",
+          filename: "a.m4a",
+          mediaType: "audio/mp4",
+          size: 123,
+          source: "provider",
+          storageKey: "output/artifacts/1-a.m4a",
+          createdAt: "t",
+        },
+      ]);
+    const arts = await api().listJobArtifacts("j11");
+    expect(arts[0]!.id).toBe("art_1");
+    expect(arts[0]!.mediaType).toBe("audio/mp4");
+    expect(requests[requests.length - 1]!.url).toBe("/api/jobs/j11/artifacts");
+    expect(requests[requests.length - 1]!.method).toBe("GET");
+  });
+
+  it("downloads an artifact streamed to disk", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "nlo-bot-dl-"));
+    const dest = path.join(dir, "out.png");
+    handler = (req, res) => {
+      if (req.url?.endsWith("/artifacts/art_9")) {
+        res.writeHead(200, { "content-type": "image/png", "content-length": "5" });
+        res.end("PNG!!");
+        return;
+      }
+      json(res, 200, []);
+    };
+    await api().downloadJobArtifact("j12", "art_9", dest);
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync(dest, "utf8")).toBe("PNG!!");
+  });
+
+  it("surfaces a 404 artifact download as an NloApiError (status 404)", async () => {
+    handler = (_q, res) => json(res, 404, { error: { code: "notFound", message: "artifact not found" } });
+    const err = await api().downloadJobArtifact("j13", "nope", "/tmp/nlo-x.bin").catch((e) => e);
+    expect(err).toBeInstanceOf(NloApiError);
+    expect((err as NloApiError).status).toBe(404);
+  });
 });

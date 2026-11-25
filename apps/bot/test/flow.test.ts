@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { botMessages, FlowManager, type FlowAction, type SourceFile } from "../src/flow.js";
+import type { JobOutputKind } from "@nlo/shared";
+import {
+  KIND_COMMANDS,
+  PHOTO_MAX_BYTES,
+  artifactSendPlan,
+  botMessages,
+  FlowManager,
+  outputLabel,
+  type FlowAction,
+  type SourceFile,
+} from "../src/flow.js";
 
 const HOUR = 3_600_000;
 
@@ -179,6 +189,88 @@ describe("flow state machine", () => {
     fm.handleSource(1, [file(1), file(2), file(3)]);
     const f = fm.flowFor(1);
     expect(f.sources.length).toBe(3);
+  });
+});
+
+describe("artifact kind flow (/<kind>)", () => {
+  it("handleKindCommand enters WAIT_SOURCE, stores output, and sends the welcome", () => {
+    const { fm, file } = setup();
+    const acts = fm.handleKindCommand(1, "audio");
+    expect(acts).toHaveLength(1);
+    expect(acts[0]!.type).toBe("send");
+    expect(acts[0]!.type === "send" && acts[0]!.text).toContain(outputLabel.audio);
+    expect(fm.peekState(1)).toBe("WAIT_SOURCE");
+    expect(fm.flowFor(1).output).toBe("audio");
+    // source → title → prompt → createJob carries the output kind.
+    expect(fm.handleSource(1, [file(1)])).toEqual([{ type: "send", text: botMessages.askTitle }]);
+    expect(fm.handleText(1, "عنوان")).toEqual([{ type: "send", text: botMessages.askPrompt }]);
+    const acts2 = fm.handleText(1, "سوال");
+    expect(acts2).toEqual([
+      {
+        type: "createJob",
+        title: "عنوان",
+        prompt: "سوال",
+        sources: [{ path: `/tmp/f1`, filename: "f1.pdf" }],
+        output: "audio",
+      },
+    ]);
+  });
+
+  it("maps every kind command to its canonical output kind", () => {
+    const { fm } = setup();
+    const cases: [string, string][] = [
+      ["audio", "audio"],
+      ["infographic", "infographic"],
+      ["slides", "slide_deck"],
+      ["report", "report"],
+      ["quiz", "quiz"],
+      ["flashcards", "flashcards"],
+      ["mindmap", "mind_map"],
+      ["datatable", "data_table"],
+    ];
+    for (const [cmd, kind] of cases) {
+      expect(KIND_COMMANDS[cmd]).toBe(kind);
+      fm.handleKindCommand(1, kind as JobOutputKind);
+      expect(fm.flowFor(1).output).toBe(kind);
+    }
+  });
+
+  it("a normal (no-kind) flow submits output=answer", () => {
+    const { runToJob } = setup();
+    const act = runToJob(1);
+    expect(act.type).toBe("createJob");
+    if (act.type === "createJob") expect(act.output).toBe("answer");
+  });
+
+  it("refuses a kind command while a job is in flight", () => {
+    const { fm, runToJob } = setup();
+    runToJob(1);
+    fm.markSubmitted(1, "j1");
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+    expect(fm.handleKindCommand(1, "report")).toEqual([{ type: "send", text: botMessages.busy }]);
+  });
+});
+
+describe("artifact delivery plan (per-kind Bale method)", () => {
+  it("audio → sendAudio", () => {
+    expect(artifactSendPlan("audio", 123)).toBe("audio");
+  });
+  it("infographic → sendPhoto under 10 MB, sendDocument over", () => {
+    expect(artifactSendPlan("infographic", PHOTO_MAX_BYTES)).toBe("photo");
+    expect(artifactSendPlan("infographic", PHOTO_MAX_BYTES + 1)).toBe("document");
+  });
+  it("slide_deck / mind_map / data_table → sendDocument", () => {
+    expect(artifactSendPlan("slide_deck", 1)).toBe("document");
+    expect(artifactSendPlan("mind_map", 1)).toBe("document");
+    expect(artifactSendPlan("data_table", 1)).toBe("document");
+  });
+  it("report / quiz / flashcards → chunked text", () => {
+    expect(artifactSendPlan("report", 1)).toBe("text");
+    expect(artifactSendPlan("quiz", 1)).toBe("text");
+    expect(artifactSendPlan("flashcards", 1)).toBe("text");
+  });
+  it("unknown kind falls back to sendDocument", () => {
+    expect(artifactSendPlan("bogus", 1)).toBe("document");
   });
 });
 

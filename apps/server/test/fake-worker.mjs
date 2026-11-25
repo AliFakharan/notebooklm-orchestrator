@@ -17,7 +17,31 @@
  *   FAKE_WORKER_DELAY_MS    Sleep this long before answering `verify`
  *                           (widens race windows for drain tests).
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
+const ARTIFACT_EXT = {
+  audio: ".m4a",
+  infographic: ".png",
+  slide_deck: ".pdf",
+  report: ".md",
+  quiz: ".md",
+  flashcards: ".md",
+  mind_map: ".json",
+  data_table: ".csv",
+};
+const ARTIFACT_MEDIA = {
+  audio: "audio/mp4",
+  infographic: "image/png",
+  slide_deck: "application/pdf",
+  report: "text/markdown",
+  quiz: "text/markdown",
+  flashcards: "text/markdown",
+  mind_map: "application/json",
+  data_table: "text/csv",
+};
 
 let script = ["ok"];
 try {
@@ -94,6 +118,48 @@ process.stdin.on("data", (chunk) => {
             },
           });
         }
+        continue;
+      }
+      if (req.op === "job") {
+        // Deterministic text answer so runJob's "answer" path is testable.
+        send({
+          id: req.id,
+          ok: true,
+          result: {
+            email: "fake@example.com",
+            notebookId: "nb_fake",
+            notebookTitle: req.params.notebookTitle ?? "nlo-fake",
+            sources: [],
+            conversationId: "conv_fake",
+            turnNumber: 1,
+            answer: `Fake answer for: ${req.params.prompt ?? ""}`,
+            references: [],
+            checkedAt: new Date().toISOString(),
+          },
+        });
+        continue;
+      }
+      if (req.op === "artifact") {
+        const kind = req.params.output;
+        const ext = ARTIFACT_EXT[kind] ?? ".bin";
+        const media = ARTIFACT_MEDIA[kind] ?? "application/octet-stream";
+        const dir = path.join(tmpdir(), "nlo-fake-artifacts");
+        mkdirSync(dir, { recursive: true });
+        const name = `fake-artifact-${kind}-${randomUUID().slice(0, 8)}${ext}`;
+        const p = path.join(dir, name);
+        writeFileSync(p, `fake ${kind} artifact`);
+        send({
+          id: req.id,
+          ok: true,
+          result: {
+            email: "fake@example.com",
+            notebookId: "nb_fake",
+            notebookTitle: req.params.notebookTitle ?? "nlo-fake",
+            kind,
+            artifact: { name, mediaType: media, path: p },
+            checkedAt: new Date().toISOString(),
+          },
+        });
         continue;
       }
       send({

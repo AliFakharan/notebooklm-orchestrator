@@ -108,6 +108,48 @@ describe("openapi", () => {
     expect(job.status).toBe("CREATED");
   });
 
+  it("accepts output + language form fields and stores them on the job", async () => {
+    const acc = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { email: "output@example.com" },
+      })
+    ).json();
+    expect(acc).toHaveProperty("id");
+    const res = await mpInject([
+      "prompt=hello",
+      "output=audio",
+      "language=fa",
+      { field: "file", filename: "doc.pdf", bytes: Buffer.from("PDF"), type: "application/pdf" },
+    ]);
+    expect(res.statusCode).toBe(201);
+    const jobId = res.json().id as string;
+    const detail = (await app.inject({ method: "GET", url: `/api/jobs/${jobId}` })).json();
+    expect(detail.input.output).toBe("audio");
+    expect(detail.input.language).toBe("fa");
+  });
+
+  it("rejects an unknown output kind with 400", async () => {
+    const acc = (
+      await app.inject({
+        method: "POST",
+        url: "/api/accounts",
+        headers: auth,
+        payload: { email: "badoutput@example.com" },
+      })
+    ).json();
+    expect(acc).toHaveProperty("id");
+    const res = await mpInject([
+      "prompt=hello",
+      "output=bogus",
+      { field: "file", filename: "doc.pdf", bytes: Buffer.from("PDF"), type: "application/pdf" },
+    ]);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/invalid output kind/);
+  });
+
   // Runs a full mock job; give it headroom under parallel-suite load.
   it("artifact download streams exact bytes under the content-map response schema", async () => {
     // makeAppContext stops the queue by default (API-only tests); this test

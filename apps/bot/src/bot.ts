@@ -24,17 +24,20 @@ import {
 } from "./bale.js";
 import { loadBotConfig, loadBotDotEnv } from "./config.js";
 import {
+  KIND_COMMANDS,
+  artifactSendPlan,
   botMessages,
   FlowManager,
   jobFailedMessage,
   mapAttachment,
+  outputLabel,
   pickLargestPhoto,
   type AttachKind,
   type FlowAction,
   type SourceFile,
 } from "./flow.js";
 import { makeFetch } from "./http.js";
-import { NloApi, NloApiError, type BotImportStatus, type BotJobSummary } from "./nlo-api.js";
+import { NloApi, NloApiError, type BotImportStatus, type BotJobSummary, type JobArtifact } from "./nlo-api.js";
 
 const log = (m: string): void => console.log(`[nlo:bot] ${m}`);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -68,6 +71,14 @@ async function main(): Promise<void> {
   await bale.setMyCommands([
     { command: "start", description: "شروع" },
     { command: "help", description: "راهنما" },
+    { command: "audio", description: "پادکست صوتی" },
+    { command: "infographic", description: "اینفوگرافیک" },
+    { command: "slides", description: "اسلاید (PDF)" },
+    { command: "report", description: "گزارش" },
+    { command: "quiz", description: "آزمون" },
+    { command: "flashcards", description: "فلش‌کارت" },
+    { command: "mindmap", description: "نقشه ذهنی" },
+    { command: "datatable", description: "جدول داده" },
     { command: "cookie", description: "به‌روزرسانی کوکی گوگل" },
     { command: "cancel", description: "لغو جاب جاری" },
   ]);
@@ -122,7 +133,12 @@ async function main(): Promise<void> {
     }
     if (a.type === "createJob") {
       try {
-        const job = await api.createJob({ prompt: a.prompt, title: a.title, files: a.sources });
+        const job = await api.createJob({
+          prompt: a.prompt,
+          title: a.title,
+          files: a.sources,
+          output: a.output !== "answer" ? a.output : undefined,
+        });
         flows.markSubmitted(chatId, job.id);
         cleanChatTemps(chatId); // uploaded; temp copies no longer needed
         send(chatId, botMessages.submitted);
@@ -227,10 +243,81 @@ async function main(): Promise<void> {
   };
 
   // --- job result delivery ---------------------------------------------------
+  /**
+   * Deliver a job's artifacts to the chat by kind. Returns true when at least
+   * one artifact was delivered (so the caller can skip the text fallback).
+   * Text-like kinds (report/quiz/flashcards) are read as markdown text and
+   * sent chunked; media/structural kinds are sent as files via the right Bale
+   * method. Temp downloads are tracked + cleaned per chat.
+   */
+   const deliverArtifacts = async (chatId: number, jobId: string, kind: string): Promise<boolean> => {
+    let arts: JobArtifact[];
+    try {
+      arts = await api.listJobArtifacts(jobId);
+    } catch (e) {
+      log(`chat ${chatId}: listJobArtifacts failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+    let delivered = false;
+    for (const art of arts) {
+      const p = path.join(tmpDir, `${chatId}-art-${randomUUID()}`);
+      trackTemp(chatId, p);
+      try {
+        await api.downloadJobArtifact(jobId, art.id, p);
+        const ok = await sendArtifactByKind(chatId, kind, art, p);
+        delivered = delivered || ok;
+      } catch (e) {
+        log(`chat ${chatId}: artifact ${art.id} download failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return delivered;
+  };
+
+  /** Pick the right Bale method for one artifact and send it. Returns success. */
+  const sendArtifactByKind = async (
+    chatId: number,
+    kind: string,
+    art: JobArtifact,
+    filePath: string,
+  ): Promise<boolean> => {
+    const caption = `«${outputLabel[kind as keyof typeof outputLabel] ?? kind}»`;
+    const plan = artifactSendPlan(kind, art.size);
+    try {
+      switch (plan) {
+        case "audio":
+          return await bale.sendAudio(chatId, filePath, art.filename, caption);
+        case "photo":
+          return await bale.sendPhoto(chatId, filePath, art.filename, caption);
+        case "document":
+          return await bale.sendDocument(chatId, filePath, art.filename, caption);
+        case "text": {
+          // Text-like: read the markdown and send it chunked as text.
+          const text = (await readFile(filePath, "utf8")).trim();
+          return await bale.sendMessage(chatId, text || caption);
+        }
+      }
+    } catch (e) {
+      log(`chat ${chatId}: sendArtifactByKind(${kind}) failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  };
+
   const handleJobResult = async (chatId: number, job: BotJobSummary): Promise<void> => {
     switch (job.status) {
       case "SUCCEEDED": {
+        // Read the kind BEFORE jobDone resets the flow (output → "answer").
+        const output = flows.flowFor(chatId).output ?? "answer";
         flows.jobDone(chatId);
+        // Artifact jobs: deliver the generated file(s)/text, else fall back to
+        // the answer markdown. The flow's `output` drives the kind selection.
+        if (output !== "answer") {
+          const delivered = await deliverArtifacts(chatId, job.id, output);
+          if (delivered) {
+            log(`chat ${chatId}: job ${job.id} artifact(s) delivered (${output})`);
+            return;
+          }
+          log(`chat ${chatId}: job ${job.id} no artifact delivered; falling back to text`);
+        }
         const answer = (job.answerMarkdown ?? "").trim() || "جاب خالی بود.";
         let text = answer;
         if (config.publicBaseUrl) text += `\n\n🔗 ${config.publicBaseUrl}/jobs/${job.id}`;
@@ -272,6 +359,51 @@ async function main(): Promise<void> {
     return out;
   };
 
+  /**
+   * Map Bale attachments to job sources (cheap validation first), download the
+   * valid ones to temp, and route them to the flow. Shared by the normal
+   * attachment path and the command-as-caption path.
+   */
+  const routeAttachments = async (
+    chatId: number,
+    attachments: { kind: AttachKind; ref: BaleFileRef }[],
+  ): Promise<void> => {
+    const mapped: { ref: BaleFileRef; filename: string; contentType: string }[] = [];
+    const errors = new Set<string>();
+    for (const att of attachments) {
+      const r = mapAttachment(att.kind, att.ref, config.maxUploadBytes);
+      if ("error" in r) {
+        if (!errors.has(r.error)) errors.add(r.error);
+        continue;
+      }
+      mapped.push({ ref: att.ref, filename: r.filename, contentType: r.contentType });
+    }
+    for (const err of errors) {
+      send(chatId, err === "tooLarge" ? botMessages.fileTooLarge : botMessages.unsupportedType);
+    }
+    if (mapped.length === 0) return;
+    const files: SourceFile[] = [];
+    let anyFailed = false;
+    for (const { ref, filename, contentType } of mapped) {
+      const p = path.join(tmpDir, `${chatId}-${randomUUID()}`);
+      try {
+        await bale.downloadFile(ref.file_id, p);
+        trackTemp(chatId, p);
+        files.push({ path: p, filename, contentType });
+      } catch (e) {
+        anyFailed = true;
+        rmSync(p, { force: true });
+        log(`chat ${chatId}: download failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (files.length === 0) {
+      send(chatId, botMessages.downloadFailed);
+      return;
+    }
+    for (const a of flows.handleSource(chatId, files)) await exec(chatId, a);
+    if (anyFailed && files.length > 0) send(chatId, botMessages.downloadFailed);
+  };
+
   const dispatch = async (u: BaleUpdate): Promise<void> => {
     const m = u.message;
     if (!m || !m.chat) return;
@@ -288,10 +420,20 @@ async function main(): Promise<void> {
       }
       const text = (m.text ?? m.caption ?? "").trim();
 
-      // Commands first.
+      // Commands first. A kind command (/audio etc.) WITH an attachment treats
+      // the attachment as the job source in the same dispatch (command-as-
+      // caption): start the kind flow, then route the attachment to handleSource.
       if (text.startsWith("/")) {
         const cmd = (text.split(/\s+/)[0] ?? "").toLowerCase();
         const base = cmd.split("@")[0] ?? "";
+        const kindCmd = base.replace(/^\//, "") as keyof typeof KIND_COMMANDS;
+        const kind = KIND_COMMANDS[kindCmd];
+        if (kind) {
+          for (const a of flows.handleKindCommand(chatId, kind)) await exec(chatId, a);
+          const atts = extractAttachments(m);
+          if (atts.length > 0) await routeAttachments(chatId, atts);
+          return;
+        }
         if (base === "/start") {
           for (const a of flows.handleStart(chatId)) await exec(chatId, a);
         } else if (base === "/help") {
@@ -329,42 +471,7 @@ async function main(): Promise<void> {
           }
           return;
         }
-        // Map first (cheap failures before any download).
-        const mapped: { ref: BaleFileRef; filename: string; contentType: string }[] = [];
-        const errors = new Set<string>();
-        for (const att of attachments) {
-          const r = mapAttachment(att.kind, att.ref, config.maxUploadBytes);
-          if ("error" in r) {
-            if (!errors.has(r.error)) errors.add(r.error);
-            continue;
-          }
-          mapped.push({ ref: att.ref, filename: r.filename, contentType: r.contentType });
-        }
-        for (const err of errors) {
-          send(chatId, err === "tooLarge" ? botMessages.fileTooLarge : botMessages.unsupportedType);
-        }
-        if (mapped.length === 0) return;
-        // Download the valid ones.
-        const files: SourceFile[] = [];
-        let anyFailed = false;
-        for (const { ref, filename, contentType } of mapped) {
-          const p = path.join(tmpDir, `${chatId}-${randomUUID()}`);
-          try {
-            await bale.downloadFile(ref.file_id, p);
-            trackTemp(chatId, p);
-            files.push({ path: p, filename, contentType });
-          } catch (e) {
-            anyFailed = true;
-            rmSync(p, { force: true });
-            log(`chat ${chatId}: download failed: ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-        if (files.length === 0) {
-          send(chatId, botMessages.downloadFailed);
-          return;
-        }
-        for (const a of flows.handleSource(chatId, files)) await exec(chatId, a);
-        if (anyFailed && files.length > 0) send(chatId, botMessages.downloadFailed);
+        await routeAttachments(chatId, attachments);
         return;
       }
 

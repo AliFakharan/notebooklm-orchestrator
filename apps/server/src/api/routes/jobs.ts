@@ -2,7 +2,14 @@ import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { ApiError, ApiCodes, MAX_SOURCES_PER_JOB, safeName, type JobSource } from "@nlo/shared";
+import {
+  ApiError,
+  ApiCodes,
+  JOB_OUTPUT_KINDS,
+  MAX_SOURCES_PER_JOB,
+  safeName,
+  type JobSource,
+} from "@nlo/shared";
 import { resolveWithin } from "@nlo/shared/resolve-within";
 import type { AppContext } from "../../app-context.js";
 import { JobArchive } from "../../domain/archive.js";
@@ -145,6 +152,21 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
       // NO account at all (clearer than a runner failure later); the runner
       // re-checks eligibility + a live verified session.
       const title = (fields.title ?? "").trim() || null;
+
+      // Optional output kind (default "answer") + language. Validate the kind
+      // against the canonical set at creation time (fail fast with 400).
+      const rawOutput = (fields.output ?? "").trim();
+      const output = rawOutput === "" ? null : (rawOutput as (typeof JOB_OUTPUT_KINDS)[number]);
+      if (output !== null && !(JOB_OUTPUT_KINDS as readonly string[]).includes(output)) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(
+          ApiCodes.validation,
+          `invalid output kind: ${rawOutput} (allowed: ${JOB_OUTPUT_KINDS.join(", ")})`,
+          400,
+        );
+      }
+      const language = (fields.language ?? "").trim() || null;
+
       if (ctx.accounts.list().length === 0) {
         await rmAll(uploads.map((u) => u.tempPath));
         throw new ApiError(
@@ -215,6 +237,8 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
           sources,
           preferredAccountId: null,
           preferredNodeId: null,
+          output,
+          language,
         },
         configSnapshot: {
           provider: ctx.provider.name,

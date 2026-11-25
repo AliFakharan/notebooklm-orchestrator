@@ -18,6 +18,7 @@ import {
   MAX_SOURCES_PER_JOB,
   safeName,
   type FailureClass,
+  type JobOutputKind,
 } from "@nlo/shared";
 import type { BalePhotoSize } from "./bale.js";
 
@@ -40,7 +41,7 @@ export interface SourceFile {
 
 export type FlowAction =
   | { type: "send"; text: string }
-  | { type: "createJob"; title: string | null; prompt: string; sources: SourceFile[] }
+  | { type: "createJob"; title: string | null; prompt: string; sources: SourceFile[]; output: JobOutputKind }
   | { type: "cancelJob"; jobId: string }
   | { type: "importCookies"; text: string };
 
@@ -50,6 +51,8 @@ export interface Flow {
   sources: SourceFile[];
   title: string | null;
   prompt: string | null;
+  /** Output kind for the job (default "answer" = the existing text answer). */
+  output: JobOutputKind;
   jobId: string | null;
   jobSubmittedAt: number | null;
   jobDeadline: number | null;
@@ -75,7 +78,7 @@ export const botMessages = {
   welcome:
     "سلام! 👋\nمن دستیار NLO هستم.\nفایل یا متنت را بفرست، بعد عنوان و سوال/دستورت را بنویس تا برایت کار کنم.\n\n📖 /help راهنما\n✋ /cancel لغو",
   help:
-    "راهنما:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم.\n\n🍪 /cookie — به‌روزرسانی کوکی گوگل (وقتی لاگین منقضی شد)\n✋ /cancel — لغو جاب جاری",
+    "راهنما:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم.\n\nخروجی‌های ویژه (بعد از دستور، فایل را بفرست):\n🎧 /audio — پادکست صوتی\n🖼️ /infographic — اینفوگرافیک\n📊 /slides — اسلاید (PDF)\n📄 /report — گزارش\n❓ /quiz — آزمون\n🃏 /flashcards — فلش‌کارت\n🧠 /mindmap — نقشه ذهنی\n📈 /datatable — جدول داده\n\n🍪 /cookie — به‌روزرسانی کوکی گوگل (وقتی لاگین منقضی شد)\n✋ /cancel — لغو جاب جاری",
   hintSource: "📎 حالا فایل یا 📝 متن خودت را بفرست.",
   onlyFileOrText: "فقط فایل یا متن را می‌فهمم. /help برای راهنما.",
   privateOnly: "فقط در گفتگوی خصوصی کار می‌کنم.",
@@ -113,6 +116,62 @@ export const botMessages = {
   cookieNoAccount: "⚠️ اکانتی روی سرور ثبت نشده است.",
 } as const;
 
+/** Persian label for an artifact output kind (user-facing). */
+export const outputLabel: Record<JobOutputKind, string> = {
+  answer: "جواب متنی",
+  audio: "پادکست",
+  infographic: "اینفوگرافیک",
+  slide_deck: "اسلاید",
+  report: "گزارش",
+  quiz: "آزمون",
+  flashcards: "فلش‌کارت",
+  mind_map: "نقشه ذهنی",
+  data_table: "جدول داده",
+};
+
+/** Kind commands the bot dispatches to handleKindCommand (command → kind). */
+export const KIND_COMMANDS: Record<string, JobOutputKind> = {
+  audio: "audio",
+  infographic: "infographic",
+  slides: "slide_deck",
+  report: "report",
+  quiz: "quiz",
+  flashcards: "flashcards",
+  mindmap: "mind_map",
+  datatable: "data_table",
+};
+
+/** Which Bale method should deliver an artifact of a given kind + size. */
+export type ArtifactSendPlan = "audio" | "photo" | "document" | "text";
+
+/** Bale sendPhoto cap (10 MB); larger images go as a document. */
+export const PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Pure mapping from an artifact kind + size to the Bale delivery method:
+ *  audio → sendAudio; infographic → sendPhoto (≤10 MB) else sendDocument;
+ *  slide_deck/mind_map/data_table → sendDocument; report/quiz/flashcards →
+ *  read the markdown and send as chunked text; anything else → sendDocument.
+ */
+export function artifactSendPlan(kind: string, size: number): ArtifactSendPlan {
+  switch (kind) {
+    case "audio":
+      return "audio";
+    case "infographic":
+      return size <= PHOTO_MAX_BYTES ? "photo" : "document";
+    case "slide_deck":
+    case "mind_map":
+    case "data_table":
+      return "document";
+    case "report":
+    case "quiz":
+    case "flashcards":
+      return "text";
+    default:
+      return "document";
+  }
+}
+
 const FAILED_MESSAGES: Record<FailureClass, string> = {
   auth: "⚠️ مشکل در ورود به اکانت گوگل بود؛ جاب انجام نشد.",
   rate_limit: "⚠️ سرویس در این لحظه مشغول است؛ جاب انجام نشد. بعداً دوباره امتحان کن.",
@@ -127,6 +186,12 @@ const FAILED_MESSAGES: Record<FailureClass, string> = {
 /** Short Persian message from the job's failure class (no secrets/stacks). */
 export function jobFailedMessage(errorClass: FailureClass | null | undefined): string {
   return (errorClass && FAILED_MESSAGES[errorClass]) || FAILED_MESSAGES.unknown;
+}
+
+/** Kind-specific welcome prompt shown right after a /<kind> command. */
+function kindWelcome(output: JobOutputKind): string {
+  const label = outputLabel[output];
+  return `🎯 حالا یک «${label}» می‌سازم.\n📎 فایل یا 📝 متن منبع را بفرست، بعد یک عنوان و دستور/سوال بنویس تا برایت بسازم.\n\n✋ /cancel — انصراف`;
 }
 
 export class FlowManager {
@@ -157,6 +222,7 @@ export class FlowManager {
         sources: [],
         title: null,
         prompt: null,
+        output: "answer",
         jobId: null,
         jobSubmittedAt: null,
         jobDeadline: null,
@@ -184,6 +250,7 @@ export class FlowManager {
     f.sources = [];
     f.title = null;
     f.prompt = null;
+    f.output = "answer";
     f.jobId = null;
     f.jobSubmittedAt = null;
     f.jobDeadline = null;
@@ -216,6 +283,20 @@ export class FlowManager {
     this.resetToIdle(f);
     f.state = "WAIT_SOURCE";
     return [{ type: "send", text: botMessages.welcome }];
+  }
+
+  /**
+   * /<kind> (e.g. /audio, /infographic) — start a job flow that produces the
+   * given artifact kind. Reuses the normal source → title → prompt flow; the
+   * only difference is the stored `output`. A single helper serves all kinds.
+   */
+  handleKindCommand(chatId: number, output: JobOutputKind): FlowAction[] {
+    const f = this.flowFor(chatId);
+    if (f.state === "SUBMITTED" && f.jobId) return [{ type: "send", text: botMessages.busy }];
+    this.resetToIdle(f);
+    f.state = "WAIT_SOURCE";
+    f.output = output;
+    return [{ type: "send", text: kindWelcome(output) }];
   }
 
   /** /help — reference text; does not disturb an in-progress flow. */
@@ -404,7 +485,9 @@ export class FlowManager {
     f.jobSubmittedAt = now;
     f.jobDeadline = now + this.jobTimeoutMs;
     f.jobId = null; // set via markSubmitted after the API 201
-    return [{ type: "createJob", title: f.title, prompt: f.prompt ?? "", sources: f.sources }];
+    return [
+      { type: "createJob", title: f.title, prompt: f.prompt ?? "", sources: f.sources, output: f.output },
+    ];
   }
 }
 

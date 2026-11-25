@@ -6,7 +6,10 @@
  * are re-checked there); the bot's pre-checks are UX only.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { FailureClass, JobStatus } from "@nlo/shared";
 
 /**
@@ -63,6 +66,17 @@ export interface JobFile {
   /** Upload file name (sanitized). */
   filename: string;
   contentType?: string;
+}
+
+/** One entry of GET /api/jobs/:id/artifacts — the fields the bot reads. */
+export interface JobArtifact {
+  id: string;
+  filename: string;
+  mediaType: string;
+  size: number;
+  source: string;
+  storageKey: string;
+  createdAt: string;
 }
 
 export interface NloApiDeps {
@@ -130,17 +144,22 @@ export class NloApi {
   }
 
   /**
-   * POST /api/jobs (multipart/form-data): field `prompt` (required), field
-   * `title` (optional), 0..N `file` parts. → 201 {id, status}.
+   * POST /api/jobs (multipart/form-data): field `prompt` (required), optional
+   * fields `title`, `output`, `language`, and 0..N `file` parts. → 201 {id,
+   * status}. `output`/`language` are appended only when present.
    */
   async createJob(input: {
     prompt: string;
     title: string | null;
     files: JobFile[];
+    output?: string;
+    language?: string;
   }): Promise<{ id: string; status: string }> {
     const form = new FormData();
     form.append("prompt", input.prompt);
     if (input.title) form.append("title", input.title);
+    if (input.output) form.append("output", input.output);
+    if (input.language) form.append("language", input.language);
     for (const f of input.files) {
       const buf = await readFile(f.path);
       form.append("file", new Blob([buf], { type: f.contentType ?? "application/octet-stream" }), f.filename);
@@ -160,6 +179,64 @@ export class NloApi {
   /** POST /api/jobs/:id/cancel → {ok, cancelled, status, note?}. */
   async cancelJob(id: string): Promise<{ ok: boolean; cancelled: boolean; status: string; note?: string }> {
     return this.request(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }, SIMPLE_TIMEOUT_MS);
+  }
+
+  /** GET /api/jobs/:id/artifacts → the job's provider-produced files. */
+  async listJobArtifacts(jobId: string): Promise<JobArtifact[]> {
+    return this.request<JobArtifact[]>(`/api/jobs/${encodeURIComponent(jobId)}/artifacts`, { method: "GET" }, SIMPLE_TIMEOUT_MS);
+  }
+
+  /**
+   * GET /api/jobs/:id/artifacts/:artifactId → the file bytes, streamed to
+   * destPath. Throws NloApiError on any failure (a partial dest is removed).
+   */
+  async downloadJobArtifact(jobId: string, artifactId: string, destPath: string): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.uploadTimeoutMs);
+    let res: Response;
+    try {
+      res = await this.fetchImpl(
+        `${this.base}/api/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactId)}`,
+        {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          signal: controller.signal,
+        },
+      );
+    } catch (e) {
+      clearTimeout(timer);
+      throw new NloApiError(
+        controller.signal.aborted
+          ? "request timed out"
+          : `api unreachable: ${e instanceof Error ? e.message : String(e)}`,
+        0,
+      );
+    }
+    if (!res.ok || !res.body) {
+      await res.body?.cancel().catch(() => {});
+      clearTimeout(timer);
+      let msg = `artifact download failed (HTTP ${res.status})`;
+      try {
+        const env = (await res.clone().json()) as { error?: { message?: string } };
+        if (env?.error?.message) msg = env.error.message;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new NloApiError(msg, res.status);
+    }
+    try {
+      await pipeline(
+        Readable.fromWeb(res.body as unknown as import("node:stream/web").ReadableStream),
+        createWriteStream(destPath),
+      );
+    } catch (e) {
+      await rm(destPath, { force: true }).catch(() => {});
+      throw new NloApiError(
+        `artifact download failed: ${e instanceof Error ? e.message : String(e)}`,
+        0,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** GET /api/sessions → one view per account (id, state, email, usability). */

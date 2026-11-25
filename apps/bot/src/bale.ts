@@ -9,7 +9,7 @@
  */
 
 import { createWriteStream } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -17,6 +17,8 @@ const DEFAULT_BASE = "https://tapi.bale.ai";
 const LONG_POLL_TIMEOUT_SEC = 30;
 const CALL_TIMEOUT_MS = 15_000;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
+/** Large media uploads (audio/podcast, PDFs) need generous headroom. */
+const UPLOAD_TIMEOUT_MS = 5 * 60_000;
 
 /** Bale's hard per-message text limit; we keep a small safety margin. */
 export const BALE_MESSAGE_HARD_LIMIT = 4096;
@@ -278,6 +280,118 @@ export class BaleClient {
     } catch (e) {
       await rm(destPath, { force: true }).catch(() => {});
       throw new BaleApiError(`file download failed: ${e instanceof Error ? e.message : String(e)}`, 0);
+    }
+  }
+
+  /**
+   * Multipart upload to a Bale send* method. Appends `chat_id`, any extra
+   * string fields, an optional `caption`, and the `file` part (named
+   * `fileName`). Returns the API's `result`. Honors a single 429 retry_after,
+   * mirroring sendChunk. Throws BaleApiError on other failures.
+   */
+  private async uploadFile(
+    method: string,
+    chatId: number,
+    filePath: string,
+    fileName: string,
+    caption: string | undefined,
+    extra: Record<string, string>,
+  ): Promise<unknown> {
+    const buf = await readFile(filePath);
+    const send = async (): Promise<unknown> => {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      for (const [k, v] of Object.entries(extra)) form.append(k, v);
+      if (caption) form.append("caption", caption);
+      form.append("file", new Blob([buf]), fileName);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+      const onAbort = (): void => controller.abort();
+      this.abortSignal?.addEventListener("abort", onAbort, { once: true });
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.url(method), { method: "POST", body: form, signal: controller.signal });
+      } catch (e) {
+        if (this.abortSignal?.aborted) throw new BaleApiError("stopped", 0);
+        throw new BaleApiError(`bale upload failed: ${e instanceof Error ? e.message : String(e)}`, 0);
+      } finally {
+        clearTimeout(timer);
+        this.abortSignal?.removeEventListener("abort", onAbort);
+      }
+      let data: {
+        ok: boolean;
+        result?: unknown;
+        description?: string;
+        error_code?: number;
+        parameters?: { retry_after?: number };
+      };
+      try {
+        data = (await res.json()) as typeof data;
+      } catch {
+        throw new BaleApiError(`bale returned non-JSON (HTTP ${res.status})`, res.status);
+      }
+      if (!res.ok || !data.ok) {
+        throw new BaleApiError(
+          data.description ?? `bale error (HTTP ${res.status})`,
+          res.status,
+          data.parameters?.retry_after ?? null,
+        );
+      }
+      return data.result;
+    };
+    try {
+      return await send();
+    } catch (e) {
+      if (e instanceof BaleApiError && e.status === 429 && e.retryAfterSec !== null) {
+        await sleep(Math.min(e.retryAfterSec, 30) * 1000);
+        try {
+          return await send();
+        } catch {
+          return undefined;
+        }
+      }
+      throw e;
+    }
+  }
+
+  /** Send a document (PDF, JSON, CSV, …). Resolves to a success flag; never throws. */
+  async sendDocument(chatId: number, filePath: string, fileName: string, caption?: string): Promise<boolean> {
+    try {
+      await this.uploadFile("sendDocument", chatId, filePath, fileName, caption, {});
+      return true;
+    } catch (e) {
+      this.log(`sendDocument failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
+  /** Send an audio file (.mp3/.m4a). Resolves to a success flag; never throws. */
+  async sendAudio(
+    chatId: number,
+    filePath: string,
+    fileName: string,
+    caption?: string,
+    durationSec?: number,
+  ): Promise<boolean> {
+    const extra: Record<string, string> = {};
+    if (durationSec !== undefined) extra["duration"] = String(Math.round(durationSec));
+    try {
+      await this.uploadFile("sendAudio", chatId, filePath, fileName, caption, extra);
+      return true;
+    } catch (e) {
+      this.log(`sendAudio failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+  }
+
+  /** Send a photo (≤10 MB). Resolves to a success flag; never throws. */
+  async sendPhoto(chatId: number, filePath: string, fileName: string, caption?: string): Promise<boolean> {
+    try {
+      await this.uploadFile("sendPhoto", chatId, filePath, fileName, caption, {});
+      return true;
+    } catch (e) {
+      this.log(`sendPhoto failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
     }
   }
 

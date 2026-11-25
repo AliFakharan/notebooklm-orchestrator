@@ -14,10 +14,14 @@ Ops:
   verify          {sessionPath, timeoutSec} -> {email, notebooks, checkedAt}
   job             {sessionPath, sources: [{path, title, mediaType}],
                    prompt, notebookTitle, waitSec, timeoutSec}
-                 -> {email, notebookId, notebookTitle,
-                     sources: [{title, sourceId, reused}],
-                     conversationId, turnNumber, answer,
-                     references, checkedAt}
+                -> {email, notebookId, notebookTitle,
+                    sources: [{title, sourceId, reused}],
+                    conversationId, turnNumber, answer,
+                    references, checkedAt}
+  artifact        {sessionPath, output: <kind>, language?, sources,
+                   prompt, notebookTitle, waitSec, timeoutSec}
+                -> {email, notebookId, notebookTitle, kind,
+                    artifact: {name, mediaType, path}, checkedAt}
 
 Security notes:
   * The worker is spawned per job with NO shell.
@@ -39,6 +43,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 # ---------------------------------------------------------------------------
 # Output plumbing: a single global write lock so JSON lines never interleave.
@@ -204,12 +209,20 @@ async def op_verify(p: dict[str, Any]) -> dict[str, Any]:
         await ctx.__aexit__(None, None, None)
 
 
-async def op_job(p: dict[str, Any]) -> dict[str, Any]:
+async def _prepare_notebook(
+    p: dict[str, Any], *, timeout_sec: float, wait_sec: float
+) -> dict[str, Any]:
+    """Open the session, resolve (select/create) the notebook, upload any
+    sources and wait for them to finish processing.
+
+    Emits the same progress stages as the original inline code
+    (opening_session → selecting_notebook → uploading_sources →
+    processing_done). Returns a dict: ctx, client, email, notebook_id,
+    notebook_title, resolved (list of {title, sourceId, reused}), source_ids.
+    The CALLER is responsible for closing the client via ctx.__aexit__.
+    """
     session = Path(p["sessionPath"])
-    prompt = str(p["prompt"])
     notebook_title = str(p["notebookTitle"])
-    wait_sec = float(p.get("waitSec", 600))
-    timeout_sec = float(p.get("timeoutSec", 1800))
     # 0..N sources, each {path, title, mediaType}.
     srcs = p.get("sources") or []
     sources: list[dict[str, Any]] = []
@@ -230,82 +243,91 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
 
     await _progress("opening_session")
     ctx, client = await _client_with(session, min(timeout_sec, 300))
+    email = await client.get_account_email(live_fallback=True)
+    await _progress("selecting_notebook")
+    notebooks = await client.notebooks.list()
+    nb = next((n for n in notebooks if getattr(n, "title", None) == notebook_title), None)
+    if nb is None:
+        nb = await client.notebooks.create(title=notebook_title)
+        await _progress("notebook_created", notebookId=getattr(nb, "notebook_id", None))
+    notebook_id = getattr(nb, "notebook_id", None) or getattr(nb, "id", None)
+
+    # NOTE: notebooklm-py's Source model identifies a source via `.id`
+    # (older builds used `.source_id`), so every read falls back to `.id`.
+    # A missing id here would otherwise surface as "Source not found: None"
+    # from wait_until_ready.
+    def _src_id(s: Any) -> str | None:
+        return getattr(s, "source_id", None) or getattr(s, "id", None)
+
+    # Idempotency anchor: on a safe retry, reuse an existing source whose
+    # title matches instead of double-uploading.
+    existing: list[Any] = []
     try:
-        email = await client.get_account_email(live_fallback=True)
-        await _progress("selecting_notebook")
-        notebooks = await client.notebooks.list()
-        nb = next(
-            (n for n in notebooks if getattr(n, "title", None) == notebook_title), None
+        existing = await client.sources.list(notebook_id)
+    except Exception:
+        existing = []
+
+    resolved: list[dict[str, Any]] = []
+    if sources:
+        await _progress("uploading_sources", count=len(sources))
+    for s in sources:
+        match = next(
+            (x for x in existing if getattr(x, "title", None) == s["title"]), None
         )
-        if nb is None:
-            nb = await client.notebooks.create(title=notebook_title)
-            await _progress(
-                "notebook_created", notebookId=getattr(nb, "notebook_id", None)
-            )
-        notebook_id = getattr(nb, "notebook_id", None) or getattr(nb, "id", None)
+        if match is not None:
+            await _progress("source_reused", title=s["title"], sourceId=_src_id(match))
+            resolved.append({"title": s["title"], "sourceId": _src_id(match), "reused": True})
+            continue
+        uploaded = await client.sources.add_file(
+            notebook_id,
+            s["path"],
+            mime_type=s["mediaType"],
+            title=s["title"],
+        )
+        await _progress("upload_done", title=s["title"], sourceId=_src_id(uploaded))
+        resolved.append({"title": s["title"], "sourceId": _src_id(uploaded), "reused": False})
 
-        # NOTE: notebooklm-py's Source model identifies a source via `.id`
-        # (older builds used `.source_id`), so every read falls back to `.id`.
-        # A missing id here would otherwise surface as "Source not found: None"
-        # from wait_until_ready.
-        def _src_id(s: Any) -> str | None:
-            return getattr(s, "source_id", None) or getattr(s, "id", None)
-
-        # Idempotency anchor: on a safe retry, reuse an existing source whose
-        # title matches instead of double-uploading.
-        existing: list[Any] = []
-        try:
-            existing = await client.sources.list(notebook_id)
-        except Exception:
-            existing = []
-
-        resolved: list[dict[str, Any]] = []
-        if sources:
-            await _progress("uploading_sources", count=len(sources))
-        for s in sources:
-            match = next(
-                (x for x in existing if getattr(x, "title", None) == s["title"]), None
-            )
-            if match is not None:
-                await _progress(
-                    "source_reused", title=s["title"], sourceId=_src_id(match)
-                )
-                resolved.append(
-                    {"title": s["title"], "sourceId": _src_id(match), "reused": True}
-                )
-                continue
-            uploaded = await client.sources.add_file(
-                notebook_id,
-                s["path"],
-                mime_type=s["mediaType"],
-                title=s["title"],
-            )
-            await _progress("upload_done", title=s["title"], sourceId=_src_id(uploaded))
-            resolved.append(
-                {"title": s["title"], "sourceId": _src_id(uploaded), "reused": False}
+    source_ids = [sid for sid in (r["sourceId"] for r in resolved) if sid]
+    for r in resolved:
+        if not r["sourceId"]:
+            raise RuntimeError(
+                f"upload for {r['title']!r} reported success but returned no "
+                "source id; cannot wait for processing"
             )
 
-        source_ids = [sid for sid in (r["sourceId"] for r in resolved) if sid]
-        for r in resolved:
-            if not r["sourceId"]:
-                raise RuntimeError(
-                    f"upload for {r['title']!r} reported success but returned no "
-                    "source id; cannot wait for processing"
-                )
+    # Wait for every source to finish processing (sequential: one at a
+    # time keeps the per-source wait bounded and progress meaningful).
+    if source_ids:
+        await _progress("waiting_for_processing")
+    for i, sid in enumerate(source_ids):
+        await client.sources.wait_until_ready(notebook_id, sid, timeout=wait_sec)
+        await _progress("processing_done", index=i + 1, of=len(source_ids))
 
-        # Wait for every source to finish processing (sequential: one at a
-        # time keeps the per-source wait bounded and progress meaningful).
-        if source_ids:
-            await _progress("waiting_for_processing")
-        for i, sid in enumerate(source_ids):
-            await client.sources.wait_until_ready(notebook_id, sid, timeout=wait_sec)
-            await _progress("processing_done", index=i + 1, of=len(source_ids))
+    return {
+        "ctx": ctx,
+        "client": client,
+        "email": email,
+        "notebook_id": notebook_id,
+        "notebook_title": notebook_title,
+        "resolved": resolved,
+        "source_ids": source_ids,
+    }
 
-        await _progress("executing_prompt")
+
+async def op_job(p: dict[str, Any]) -> dict[str, Any]:
+    prompt = str(p["prompt"])
+    wait_sec = float(p.get("waitSec", 600))
+    timeout_sec = float(p.get("timeoutSec", 1800))
+    prep = await _prepare_notebook(p, timeout_sec=timeout_sec, wait_sec=wait_sec)
+    client = prep["client"]
+    try:
+        await emit(
+            {"event": "progress", "op": None, "data": {"stage": "executing_prompt"}}
+        )
         result = await client.chat.ask(
-            notebook_id, prompt, source_ids=source_ids or None
+            prep["notebook_id"], prompt, source_ids=prep["source_ids"] or None
         )
-        await _progress("prompt_done")
+        await emit({"event": "progress", "op": None, "data": {"stage": "prompt_done"}})
 
         refs = []
         for r in getattr(result, "references", None) or []:
@@ -317,10 +339,10 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
             )
 
         return {
-            "email": email,
-            "notebookId": notebook_id,
-            "notebookTitle": notebook_title,
-            "sources": resolved,
+            "email": prep["email"],
+            "notebookId": prep["notebook_id"],
+            "notebookTitle": prep["notebook_title"],
+            "sources": prep["resolved"],
             "conversationId": getattr(result, "conversation_id", None),
             "turnNumber": getattr(result, "turn_number", None),
             "answer": getattr(result, "answer", "") or "",
@@ -328,7 +350,220 @@ async def op_job(p: dict[str, Any]) -> dict[str, Any]:
             "checkedAt": now_iso(),
         }
     finally:
-        await ctx.__aexit__(None, None, None)
+        await prep["ctx"].__aexit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Artifact generation (op_artifact). Each kind maps to a notebooklm-py
+# generate_* + download_* pair with the fixed v1 defaults. mind_map is
+# synchronous (returns the parsed structure, no task_id / wait).
+# ---------------------------------------------------------------------------
+ARTIFACT_KINDS: dict[str, dict[str, str]] = {
+    "audio": {"ext": ".m4a", "mediaType": "audio/mp4"},
+    "infographic": {"ext": ".png", "mediaType": "image/png"},
+    "slide_deck": {"ext": ".pdf", "mediaType": "application/pdf"},
+    "report": {"ext": ".md", "mediaType": "text/markdown"},
+    "quiz": {"ext": ".md", "mediaType": "text/markdown"},
+    "flashcards": {"ext": ".md", "mediaType": "text/markdown"},
+    "mind_map": {"ext": ".json", "mediaType": "application/json"},
+    "data_table": {"ext": ".csv", "mediaType": "text/csv"},
+}
+
+
+async def _generate_artifact(
+    artifacts_api: Any,
+    kind: str,
+    notebook_id: str,
+    source_ids: list[str] | None,
+    language: str,
+    prompt: str,
+) -> Any:
+    """Kick off generation for `kind`; return the result (a GenerationStatus
+    with a task_id for every kind except mind_map)."""
+    if kind == "audio":
+        from notebooklm import AudioLength
+
+        return await artifacts_api.generate_audio(
+            notebook_id,
+            source_ids=source_ids,
+            language=language,
+            instructions=prompt or None,
+            audio_length=AudioLength.DEFAULT,
+        )
+    if kind == "infographic":
+        from notebooklm import InfographicDetail, InfographicOrientation, InfographicStyle
+
+        return await artifacts_api.generate_infographic(
+            notebook_id,
+            source_ids=source_ids,
+            language=language,
+            instructions=prompt or None,
+            orientation=InfographicOrientation.LANDSCAPE,
+            detail_level=InfographicDetail.STANDARD,
+            style=InfographicStyle.AUTO_SELECT,
+        )
+    if kind == "slide_deck":
+        from notebooklm import SlideDeckLength
+
+        return await artifacts_api.generate_slide_deck(
+            notebook_id,
+            source_ids=source_ids,
+            language=language,
+            instructions=prompt or None,
+            slide_length=SlideDeckLength.DEFAULT,
+        )
+    if kind == "report":
+        from notebooklm import ReportFormat
+
+        return await artifacts_api.generate_report(
+            notebook_id,
+            report_format=ReportFormat.BRIEFING_DOC,
+            source_ids=source_ids,
+            language=language,
+            custom_prompt=prompt or None,
+        )
+    if kind == "quiz":
+        from notebooklm import QuizDifficulty, QuizQuantity
+
+        return await artifacts_api.generate_quiz(
+            notebook_id,
+            source_ids=source_ids,
+            instructions=prompt or None,
+            quantity=QuizQuantity.STANDARD,
+            difficulty=QuizDifficulty.MEDIUM,
+        )
+    if kind == "flashcards":
+        from notebooklm import QuizDifficulty, QuizQuantity
+
+        return await artifacts_api.generate_flashcards(
+            notebook_id,
+            source_ids=source_ids,
+            instructions=prompt or None,
+            quantity=QuizQuantity.STANDARD,
+            difficulty=QuizDifficulty.MEDIUM,
+        )
+    if kind == "data_table":
+        return await artifacts_api.generate_data_table(
+            notebook_id,
+            source_ids=source_ids,
+            language=language,
+            instructions=prompt or None,
+        )
+    raise ValueError(f"unknown artifact kind: {kind}")
+
+
+async def _download_artifact(
+    artifacts_api: Any, kind: str, notebook_id: str, out_path: Path, task_id: str
+) -> None:
+    """Download a completed artifact to out_path (format per kind)."""
+    dest = str(out_path)
+    if kind == "audio":
+        await artifacts_api.download_audio(notebook_id, dest, artifact_id=task_id)
+    elif kind == "infographic":
+        await artifacts_api.download_infographic(notebook_id, dest, artifact_id=task_id)
+    elif kind == "slide_deck":
+        await artifacts_api.download_slide_deck(
+            notebook_id, dest, artifact_id=task_id, output_format="pdf"
+        )
+    elif kind == "report":
+        await artifacts_api.download_report(notebook_id, dest, artifact_id=task_id)
+    elif kind == "quiz":
+        await artifacts_api.download_quiz(
+            notebook_id, dest, artifact_id=task_id, output_format="markdown"
+        )
+    elif kind == "flashcards":
+        await artifacts_api.download_flashcards(
+            notebook_id, dest, artifact_id=task_id, output_format="markdown"
+        )
+    elif kind == "data_table":
+        await artifacts_api.download_data_table(notebook_id, dest, artifact_id=task_id)
+    else:
+        raise ValueError(f"unknown artifact kind: {kind}")
+
+
+async def op_artifact(p: dict[str, Any]) -> dict[str, Any]:
+    kind = str(p.get("output") or "")
+    if kind not in ARTIFACT_KINDS:
+        raise ValueError(
+            f"invalid artifact output: {kind!r} (allowed: {', '.join(ARTIFACT_KINDS)})"
+        )
+    language = str(p.get("language") or "fa")
+    prompt = str(p.get("prompt") or "")
+    wait_sec = float(p.get("waitSec", 1800))
+    timeout_sec = float(p.get("timeoutSec", 1800))
+    meta = ARTIFACT_KINDS[kind]
+
+    prep = await _prepare_notebook(p, timeout_sec=timeout_sec, wait_sec=wait_sec)
+    client = prep["client"]
+    notebook_id = prep["notebook_id"]
+    source_ids: list[str] | None = prep["source_ids"] or None
+    try:
+        await emit(
+            {
+                "event": "progress",
+                "op": None,
+                "data": {"stage": "generating_artifact", "kind": kind},
+            }
+        )
+
+        out_dir = Path(tempfile.gettempdir()) / "nlo-artifacts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"artifact-{kind}-{uuid4().hex[:12]}{meta['ext']}"
+
+        if kind == "mind_map":
+            # Synchronous: returns the parsed structure (no task_id / wait).
+            result = await client.artifacts.generate_mind_map(
+                notebook_id,
+                source_ids=source_ids,
+                language=language,
+                instructions=prompt or None,
+            )
+            structure = getattr(result, "mind_map", None)
+            if structure is None:
+                raise RuntimeError("mind map generation returned an empty structure")
+            out_path.write_text(
+                json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        else:
+            status = await _generate_artifact(
+                client.artifacts, kind, notebook_id, source_ids, language, prompt
+            )
+            task_id = getattr(status, "task_id", None)
+            if not task_id:
+                raise RuntimeError("generation kickoff returned no task id")
+            # wait_for_completion raises a WaitTimeoutError subclass on
+            # timeout (_classify maps it to "timeout").
+            status = await client.artifacts.wait_for_completion(
+                notebook_id, task_id, timeout=wait_sec
+            )
+            if status.is_failed:
+                from notebooklm import RateLimitError, ServerError
+
+                if status.is_rate_limited:
+                    raise RateLimitError(
+                        f"artifact generation rate limited: {status.error or 'quota/rate limit'}"
+                    )
+                raise ServerError(f"artifact generation failed: {status.error or 'unknown'}")
+            await _download_artifact(client.artifacts, kind, notebook_id, out_path, task_id)
+
+        if not out_path.is_file() or out_path.stat().st_size == 0:
+            raise RuntimeError(f"artifact download produced no file: {kind}")
+
+        await emit({"event": "progress", "op": None, "data": {"stage": "artifact_done"}})
+        return {
+            "email": prep["email"],
+            "notebookId": notebook_id,
+            "notebookTitle": prep["notebook_title"],
+            "kind": kind,
+            "artifact": {
+                "name": out_path.name,
+                "mediaType": meta["mediaType"],
+                "path": str(out_path),
+            },
+            "checkedAt": now_iso(),
+        }
+    finally:
+        await prep["ctx"].__aexit__(None, None, None)
 
 
 OPS = {
@@ -336,6 +571,7 @@ OPS = {
     "validate": op_validate,
     "verify": op_verify,
     "job": op_job,
+    "artifact": op_artifact,
 }
 
 

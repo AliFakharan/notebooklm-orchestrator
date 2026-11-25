@@ -39,6 +39,30 @@ interface AuthTunnelSelection {
   handle: { host: string; port: number };
 }
 
+/** Short Persian label for an artifact kind (used in the job's answer field). */
+function artifactLabel(kind: string): string {
+  switch (kind) {
+    case "audio":
+      return "پادکست";
+    case "infographic":
+      return "اینفوگرافیک";
+    case "slide_deck":
+      return "اسلاید";
+    case "report":
+      return "گزارش";
+    case "quiz":
+      return "آزمون";
+    case "flashcards":
+      return "فلش‌کارت";
+    case "mind_map":
+      return "نقشه ذهنی";
+    case "data_table":
+      return "جدول داده";
+    default:
+      return "خروجی";
+  }
+}
+
 export class PythonWorkerProvider implements NotebookLMProvider {
   readonly name = "python-worker";
 
@@ -213,8 +237,8 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       submitAudioJob: { level: live, note: "real upload + ask via notebooklm-py" },
       retrieveResult: { level: live, note: "real grounded answer" },
       retrieveArtifacts: {
-        level: CapLevel.unsupported,
-        note: "chat answers are text; no downloadable artifacts in this workflow",
+        level: CapLevel.implementedUntestedLive,
+        note: "audio/infographic/slide/report/quiz/flashcards/mindmap/data-table via notebooklm-py",
       },
       cancelJob: {
         level: CapLevel.experimental,
@@ -443,6 +467,8 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         needsReauth: true,
       });
     }
+    const output = req.output ?? "answer";
+    const isArtifact = output !== "answer";
     const notebookTitle = `nlo-${req.jobId.slice(0, 16)}`;
     const w = new WorkerSupervisor({
       pythonBin: this.opts.pythonBin,
@@ -461,6 +487,8 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       processing_done: [80, "sources processed"],
       executing_prompt: [85, "executing prompt"],
       prompt_done: [95, "prompt completed"],
+      generating_artifact: [85, "generating artifact"],
+      artifact_done: [95, "artifact generated"],
     };
     w.setEventSink((data) => {
       const stage = typeof data.stage === "string" ? data.stage : "";
@@ -471,6 +499,59 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     this.active.set(req.jobId, w);
     try {
       await w.start();
+      if (isArtifact) {
+        const r = await w.request<{
+          email: string;
+          notebookId: string | null;
+          notebookTitle: string;
+          kind: string;
+          artifact: { name: string; mediaType: string; path: string };
+          checkedAt: string;
+        }>("artifact", {
+          sessionPath,
+          output,
+          language: req.language ?? "fa",
+          sources: req.sources.map((s) => ({
+            path: s.path,
+            title: s.title,
+            mediaType: s.mediaType,
+          })),
+          prompt: req.prompt,
+          notebookTitle,
+          waitSec: 1800,
+          timeoutSec: Math.floor((this.opts.jobTimeoutMs ?? 30 * 60_000) / 1000),
+        });
+        if (!r.artifact?.path || !existsSync(r.artifact.path)) {
+          throw new ProviderFailure({
+            failureClass: "provider",
+            message: "artifact op returned no downloadable file; not reporting success",
+            ambiguous: true,
+            needsReauth: false,
+          });
+        }
+        req.onProgress(100, "retrieved artifact");
+        return {
+          // The bot sends the file/text directly; the caption is the fallback
+          // + the job's answer field.
+          answerMarkdown: `«${artifactLabel(r.kind)}» آماده شد`,
+          providerMeta: {
+            simulated: false,
+            provider: this.name,
+            email: r.email,
+            notebookId: r.notebookId,
+            notebookTitle: r.notebookTitle,
+            output,
+            kind: r.kind,
+            checkedAt: r.checkedAt,
+            route: req.tunnel
+              ? { nodeId: req.tunnel.nodeId, host: req.tunnel.host, port: req.tunnel.port }
+              : null,
+          },
+          artifacts: [
+            { name: r.artifact.name, mediaType: r.artifact.mediaType, path: r.artifact.path },
+          ],
+        };
+      }
       const r = await w.request<{
         email: string;
         notebookId: string | null;

@@ -160,6 +160,25 @@ export interface JobSource {
   providerConfirmed: boolean;
 }
 
+/**
+ * The output a job produces. "answer" (the default) is the existing text
+ * answer. Every other value is a NotebookLM **artifact** produced by the
+ * python-worker's `artifact` op. The canonical strings are used end-to-end
+ * (API -> JobInput -> provider -> worker -> bot).
+ */
+export const JOB_OUTPUT_KINDS = [
+  "answer",
+  "audio",
+  "infographic",
+  "slide_deck",
+  "report",
+  "quiz",
+  "flashcards",
+  "mind_map",
+  "data_table",
+] as const;
+export type JobOutputKind = (typeof JOB_OUTPUT_KINDS)[number];
+
 export interface JobInput {
   prompt: string;
   /** Optional human-friendly title; when absent the prompt is displayed. */
@@ -169,10 +188,16 @@ export interface JobInput {
    * (pdf, docx, pptx, csv, txt, md, epub, images, audio); see
    * ALLOWED_SOURCE_EXTENSIONS. Each file is capped by the server's
    * maxUploadBytes (100 MB default, mirroring NotebookLM's per-source limit).
+   * Non-answer `output` kinds require at least one source (validated in the
+   * job runner).
    */
   sources: JobSource[];
   preferredAccountId: string | null;
   preferredNodeId: string | null;
+  /** Output to produce (default "answer" = the existing text answer). */
+  output?: JobOutputKind | null;
+  /** BCP-47 language for artifact generation (default "fa", set server-side). */
+  language?: string | null;
 }
 
 /**

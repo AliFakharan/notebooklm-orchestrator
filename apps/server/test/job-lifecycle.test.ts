@@ -224,3 +224,60 @@ describe("input source cleanup after success", () => {
     expect(timelineTypes(root)).not.toContain("sources_cleaned");
   });
 });
+
+describe("artifact output (non-answer)", () => {
+  const pdf = { name: "doc.pdf", content: "PDF", mediaType: "application/pdf" };
+
+  function createOutputJob(output: string) {
+    const job = createJobWithSources(parts.jobs, parts.jobsDir, [pdf], "build it");
+    // Patch the stored input with the output kind (input_json round-trips it).
+    const db = parts.jobs as unknown as { db: { raw: import("node:sqlite").DatabaseSync } };
+    const row = db.db.raw
+      .prepare("SELECT input_json FROM jobs WHERE id = ?")
+      .get(job.id) as { input_json: string };
+    const input = JSON.parse(row.input_json);
+    input.output = output;
+    input.language = "fa";
+    db.db.raw.prepare("UPDATE jobs SET input_json = ? WHERE id = ?").run(JSON.stringify(input), job.id);
+    return job;
+  }
+
+  it("runs a non-answer output to SUCCEEDED and stores the kind artifact", async () => {
+    setupHappy();
+    const job = createOutputJob("report");
+    const result = await parts.runner.run(job.id);
+    expect(result.status).toBe("SUCCEEDED");
+    expect(result.answerMarkdown).toBe("«report» آماده شد (mock)");
+    expect(result.resultProviderMeta?.output).toBe("report");
+    const art = parts.db.raw
+      .prepare("SELECT filename, media_type, storage_key FROM artifacts WHERE job_id = ?")
+      .all(job.id) as { filename: string; media_type: string; storage_key: string }[];
+    expect(art).toHaveLength(1);
+    expect(art[0]!.media_type).toBe("text/markdown");
+    expect(art[0]!.filename).toMatch(/\.md$/);
+    expect(existsSync(path.join(parts.jobsDir, job.id, art[0]!.storage_key))).toBe(true);
+  });
+
+  it("fails closed (invalid_input) when a non-answer output has no sources", async () => {
+    setupHappy();
+    const job = createJob(parts.jobs, "build it");
+    const db = parts.jobs as unknown as { db: { raw: import("node:sqlite").DatabaseSync } };
+    const row = db.db.raw
+      .prepare("SELECT input_json FROM jobs WHERE id = ?")
+      .get(job.id) as { input_json: string };
+    const input = JSON.parse(row.input_json);
+    input.output = "audio";
+    db.db.raw.prepare("UPDATE jobs SET input_json = ? WHERE id = ?").run(JSON.stringify(input), job.id);
+    const result = await parts.runner.run(job.id);
+    expect(result.status).toBe("FAILED");
+    expect(result.errorClass).toBe("invalid_input");
+    expect(result.errorMessage).toMatch(/at least one source/);
+  });
+
+  it("still allows an answer job with zero sources (behavior unchanged)", async () => {
+    setupHappy();
+    const job = createJob(parts.jobs, "hello");
+    const result = await parts.runner.run(job.id);
+    expect(result.status).toBe("SUCCEEDED");
+  });
+});

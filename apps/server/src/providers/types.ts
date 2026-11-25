@@ -1,4 +1,4 @@
-import type { FailureClass } from "@nlo/shared";
+import type { FailureClass, JobOutputKind } from "@nlo/shared";
 import type { ProviderEgress } from "../proxy/egress.js";
 import type { TunnelHandle } from "../proxy/runtime.js";
 
@@ -37,6 +37,14 @@ export interface ProviderJobRequest {
   /** Opaque per-account credential handle resolved by the provider (not a secret). */
   credentialRef: string;
   prompt: string;
+  /**
+   * Output to produce. "answer" (or null) runs the existing text-answer
+   * workflow; any other JOB_OUTPUT_KINDS value asks the provider to produce
+   * that NotebookLM artifact (returned in `artifacts`).
+   */
+  output?: JobOutputKind | null;
+  /** BCP-47 language for artifact generation (default "fa" server-side). */
+  language?: string | null;
   /**
    * Uploaded sources (0..N), any NotebookLM-permitted format. The provider
    * uploads each as a separate NotebookLM source.

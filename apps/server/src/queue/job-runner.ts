@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { DatabaseSync } from "node:sqlite";
 import { backoffMs, classifyError, isRetryableError } from "@nlo/shared";
 import { resolveWithin } from "@nlo/shared/resolve-within";
@@ -199,6 +202,8 @@ export class JobRunner {
             accountId: account.id,
             credentialRef,
             prompt: job.input.prompt,
+            output: job.input.output ?? "answer",
+            language: job.input.language ?? null,
             sources: job.input.sources
               .map((s) => ({
                 path: this.sourcePathInArchive(jobId, s.storageName, s.size),
@@ -218,6 +223,7 @@ export class JobRunner {
             archive.storeArtifact(a.path, a.name, i + 1),
           );
           this.storeArtifacts(jobId, stored, result.artifacts);
+          this.cleanupArtifactTemp(jobId, result.artifacts);
           this.d.jobs.recordAttempt(jobId, attemptNo, account.id, nodeId, attemptStart, "ok", {
             provider: this.d.provider.name,
           });
@@ -291,6 +297,17 @@ export class JobRunner {
         errorMessage: "prompt is empty",
       });
       this.logEvent(jobId, archive, "validation_failed", "prompt is empty");
+      return false;
+    }
+    // Non-answer outputs are NotebookLM artifacts generated from the
+    // notebook's sources, so they require at least one source (fail-closed).
+    const output = job.input.output ?? "answer";
+    if (output !== "answer" && job.input.sources.length === 0) {
+      this.d.jobs.setStatus(jobId, "FAILED", {
+        errorClass: "invalid_input",
+        errorMessage: `output "${output}" requires at least one source file`,
+      });
+      this.logEvent(jobId, archive, "validation_failed", `output ${output} requires a source`);
       return false;
     }
     try {
@@ -504,6 +521,29 @@ export class JobRunner {
   private sourcePathInArchive(jobId: string, storageName: string, size: number): string | null {
     if (size <= 0 || !storageName) return null;
     return resolveWithin(this.d.jobsDir, jobId, "input", "sources", storageName);
+  }
+
+  /**
+   * Best-effort removal of the provider's temp artifact files after the
+   * archive copy: the worker writes to the OS tmp dir and, once
+   * storeArtifact + the DB row exist, nothing references the original
+   * anymore. Only files inside the system tmp dir are touched. A cleanup
+   * failure must never fail the job — it is only logged.
+   */
+  private cleanupArtifactTemp(jobId: string, artifacts: { path: string }[]): void {
+    const tmpRoot = resolve(tmpdir());
+    const inTmp = (p: string): boolean =>
+      p === tmpRoot || p.startsWith(tmpRoot + "/") || p.startsWith(tmpRoot.replace(/\/+$/, "") + "/");
+    for (const a of artifacts) {
+      if (!a.path || !isAbsolute(a.path)) continue;
+      const p = resolve(a.path);
+      if (!inTmp(p)) continue;
+      try {
+        rmSync(p, { force: true });
+      } catch (err) {
+        this.d.log(`artifact temp cleanup failed for ${jobId}: ${redact(String(err))}`);
+      }
+    }
   }
 
   /**
