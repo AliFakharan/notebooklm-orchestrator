@@ -1,4 +1,4 @@
-import type { FailureClass, JobOutputKind } from "@nlo/shared";
+import type { FailureClass, JobMode, JobOutputKind } from "@nlo/shared";
 import type { ProviderEgress } from "../proxy/egress.js";
 import type { TunnelHandle } from "../proxy/runtime.js";
 
@@ -45,6 +45,20 @@ export interface ProviderJobRequest {
   output?: JobOutputKind | null;
   /** BCP-47 language for artifact generation (default "fa" server-side). */
   language?: string | null;
+  // --- persistent notebook session anchoring (resolved by the runner) ----
+  /** When set, this job anchors to a notebook session. */
+  sessionId?: string | null;
+  /** What this job does relative to its session (null = no session). */
+  mode?: JobMode | null;
+  /**
+   * The session's notebook id. When present the provider addresses this
+   * EXISTING notebook (no create); the runner supplies it for anchored modes.
+   */
+  notebookId?: string | null;
+  /** The session's stable notebook title (creation/fallback key). */
+  notebookTitle?: string | null;
+  /** The session's active conversation id (for `ask` follow-ups). */
+  conversationId?: string | null;
   /**
    * Uploaded sources (0..N), any NotebookLM-permitted format. The provider
    * uploads each as a separate NotebookLM source.
@@ -65,6 +79,14 @@ export interface ProviderJobResult {
   providerMeta: Record<string, unknown>;
   /** Files the provider actually produced. Application must not fabricate. */
   artifacts: { name: string; mediaType: string; path: string }[];
+  // --- session anchor (populated by real providers so the runner can
+  //     write the notebook/conversation back onto the session) ----------
+  /** The notebook id the job ran against (anchor the session to it). */
+  notebookId?: string | null;
+  /** The notebook title actually used (anchor the session to it). */
+  notebookTitle?: string | null;
+  /** The conversation id after the job (for follow-up `ask` ops). */
+  conversationId?: string | null;
 }
 
 export interface ProviderError {

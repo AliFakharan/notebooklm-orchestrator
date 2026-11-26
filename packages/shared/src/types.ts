@@ -179,6 +179,17 @@ export const JOB_OUTPUT_KINDS = [
 ] as const;
 export type JobOutputKind = (typeof JOB_OUTPUT_KINDS)[number];
 
+/**
+ * What a job does relative to a persistent notebook session. `create` runs the
+ * first job that opens a session (a fresh notebook); `ask` is a follow-up on
+ * the session's conversation; `add_source` appends files to the session's
+ * notebook; `artifact` generates a typed output on the session's notebook. A
+ * job with no `mode` is the historical per-job behavior (fresh notebook each
+ * time) and never anchors a session.
+ */
+export const JOB_MODES = ["create", "ask", "add_source", "artifact"] as const;
+export type JobMode = (typeof JOB_MODES)[number];
+
 export interface JobInput {
   prompt: string;
   /** Optional human-friendly title; when absent the prompt is displayed. */
@@ -198,6 +209,13 @@ export interface JobInput {
   output?: JobOutputKind | null;
   /** BCP-47 language for artifact generation (default "fa", set server-side). */
   language?: string | null;
+  // --- persistent notebook session anchoring -----------------------------
+  /** When set, this job anchors to a notebook session (see NotebookSession). */
+  sessionId?: string | null;
+  /** What this job does relative to its session (null = no session). */
+  mode?: JobMode | null;
+  /** The chat that owns the session (used to create the anchor on `create`). */
+  chatId?: number | null;
 }
 
 /**
@@ -338,6 +356,29 @@ export interface Job {
   conversationId?: string | null;
   operationIds?: Record<string, string> | null;
   resultProvenance?: ResultProvenance;
+}
+
+/** Lifecycle of a persistent notebook session. */
+export type NotebookSessionStatus = "open" | "closed" | "expired";
+
+/**
+ * A persistent notebook session: one Google NotebookLM notebook that the bot
+ * keeps "open" for a bounded idle window so follow-up questions, new sources,
+ * and typed outputs all target the SAME notebook. `notebookId` is null until
+ * the session's first job succeeds (the notebook is created by Google then).
+ * `conversationId` is the active chat thread for follow-up `ask` ops.
+ */
+export interface NotebookSession {
+  id: string;
+  chatId: number;
+  accountId: string | null;
+  notebookId: string | null;
+  notebookTitle: string;
+  conversationId: string | null;
+  status: NotebookSessionStatus;
+  createdAt: string;
+  lastUsedAt: string;
+  closedAt: string | null;
 }
 
 export type FailureClass =

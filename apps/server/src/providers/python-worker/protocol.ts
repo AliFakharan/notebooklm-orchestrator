@@ -5,7 +5,15 @@ import { z } from "zod";
  * (nbl_worker.py). Every message is validated with zod on both ends.
  */
 
-export const OpCodes = ["ping", "validate", "verify", "job", "artifact"] as const;
+export const OpCodes = [
+  "ping",
+  "validate",
+  "verify",
+  "job",
+  "artifact",
+  "ask",
+  "add_source",
+] as const;
 export type WorkerOp = (typeof OpCodes)[number];
 
 export const WorkerRequest = z.object({

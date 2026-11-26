@@ -243,6 +243,58 @@ describe("NloApi", () => {
     expect(requests[requests.length - 1]!.method).toBe("GET");
   });
 
+  it("appends session fields (mode/sessionId/chatId) to a create-job form", async () => {
+    requests.length = 0;
+    handler = (_q, res) =>
+      json(res, 201, { id: "j20", status: "CREATED", sessionId: "ns_1", mode: "create", notebookTitle: "t", notebookId: null });
+    const r = await api().createJob({
+      prompt: "p",
+      title: null,
+      files: [],
+      mode: "create",
+      sessionId: null,
+      chatId: 77,
+    });
+    expect(r.sessionId).toBe("ns_1");
+    expect(r.mode).toBe("create");
+    const body = requests[0]!.body.toString("utf8");
+    expect(body).toContain('name="mode"');
+    expect(body).toContain("create");
+    expect(body).toContain('name="chatId"');
+    expect(body).toContain("77");
+    // A null sessionId is omitted (the server generates one on create).
+    expect(body).not.toContain('name="sessionId"');
+  });
+
+  it("sends a follow-up ask with its sessionId (and omits chatId)", async () => {
+    requests.length = 0;
+    handler = (_q, res) =>
+      json(res, 201, { id: "j21", status: "CREATED", sessionId: "ns_1", mode: "ask", notebookTitle: null, notebookId: "nb_1" });
+    await api().createJob({
+      prompt: "سوال جدید",
+      title: null,
+      files: [],
+      mode: "ask",
+      sessionId: "ns_1",
+      chatId: null,
+    });
+    const body = requests[0]!.body.toString("utf8");
+    expect(body).toContain('name="mode"');
+    expect(body).toContain("ask");
+    expect(body).toContain('name="sessionId"');
+    expect(body).toContain("ns_1");
+    expect(body).not.toContain('name="chatId"');
+  });
+
+  it("finishes a notebook session via POST /api/notebook-sessions/:id/finish", async () => {
+    requests.length = 0;
+    handler = (_q, res) => json(res, 200, { ok: true, status: "closed", note: null });
+    const r = await api().finishSession("ns_1");
+    expect(r).toEqual({ ok: true, status: "closed", note: null });
+    expect(requests[requests.length - 1]!.url).toBe("/api/notebook-sessions/ns_1/finish");
+    expect(requests[requests.length - 1]!.method).toBe("POST");
+  });
+
   it("appends output + language form fields only when present", async () => {
     requests.length = 0;
     handler = (_q, res) => json(res, 201, { id: "j9", status: "CREATED" });

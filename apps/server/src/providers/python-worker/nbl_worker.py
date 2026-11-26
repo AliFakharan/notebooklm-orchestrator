@@ -13,15 +13,28 @@ Ops:
   validate        {sessionPath} -> {ok, exists, email?}
   verify          {sessionPath, timeoutSec} -> {email, notebooks, checkedAt}
   job             {sessionPath, sources: [{path, title, mediaType}],
-                   prompt, notebookTitle, waitSec, timeoutSec}
-                -> {email, notebookId, notebookTitle,
-                    sources: [{title, sourceId, reused}],
-                    conversationId, turnNumber, answer,
-                    references, checkedAt}
+                   prompt, notebookTitle, notebookId?, waitSec, timeoutSec}
+               -> {email, notebookId, notebookTitle,
+                   sources: [{title, sourceId, reused}],
+                   conversationId, turnNumber, answer,
+                   references, checkedAt}
   artifact        {sessionPath, output: <kind>, language?, sources,
-                   prompt, notebookTitle, waitSec, timeoutSec}
-                -> {email, notebookId, notebookTitle, kind,
-                    artifact: {name, mediaType, path}, checkedAt}
+                   prompt, notebookTitle, notebookId?, waitSec, timeoutSec}
+               -> {email, notebookId, notebookTitle, kind,
+                   artifact: {name, mediaType, path}, checkedAt}
+  ask             {sessionPath, notebookId, conversationId?, prompt,
+                   timeoutSec}
+               -> {email, notebookId, conversationId, turnNumber, answer,
+                   references, checkedAt}
+  add_source      {sessionPath, notebookId, sources: [{path, title, mediaType}],
+                   waitSec, timeoutSec}
+               -> {email, notebookId,
+                   sources: [{title, sourceId, reused}], sourceIds, checkedAt}
+
+  `job`/`artifact`/`ask`/`add_source` all accept an optional `notebookId` that
+  addresses an EXISTING notebook by id (a persistent session anchor) instead of
+  resolving it by `notebookTitle`. When `notebookId` is present the notebook is
+  looked up by id; `notebookTitle` is the fallback/creation key.
 
 Security notes:
   * The worker is spawned per job with NO shell.
@@ -222,7 +235,8 @@ async def _prepare_notebook(
     The CALLER is responsible for closing the client via ctx.__aexit__.
     """
     session = Path(p["sessionPath"])
-    notebook_title = str(p["notebookTitle"])
+    notebook_id_hint = p.get("notebookId") or None
+    notebook_title = str(p.get("notebookTitle") or "")
     # 0..N sources, each {path, title, mediaType}.
     srcs = p.get("sources") or []
     sources: list[dict[str, Any]] = []
@@ -246,10 +260,26 @@ async def _prepare_notebook(
     email = await client.get_account_email(live_fallback=True)
     await _progress("selecting_notebook")
     notebooks = await client.notebooks.list()
-    nb = next((n for n in notebooks if getattr(n, "title", None) == notebook_title), None)
-    if nb is None:
+    # Resolve the notebook: by id first (a persistent session anchor), then by
+    # title (fallback / fresh creation). A session with a known notebookId
+    # never creates a second notebook even if the title drifted.
+    nb = None
+    if notebook_id_hint:
+        nb = next(
+            (
+                n
+                for n in notebooks
+                if (getattr(n, "notebook_id", None) or getattr(n, "id", None)) == notebook_id_hint
+            ),
+            None,
+        )
+    if nb is None and notebook_title:
+        nb = next((n for n in notebooks if getattr(n, "title", None) == notebook_title), None)
+    if nb is None and notebook_title:
         nb = await client.notebooks.create(title=notebook_title)
         await _progress("notebook_created", notebookId=getattr(nb, "notebook_id", None))
+    if nb is None:
+        raise ValueError("no notebookId or notebookTitle provided to resolve a notebook")
     notebook_id = getattr(nb, "notebook_id", None) or getattr(nb, "id", None)
 
     # NOTE: notebooklm-py's Source model identifies a source via `.id`
@@ -566,12 +596,135 @@ async def op_artifact(p: dict[str, Any]) -> dict[str, Any]:
         await prep["ctx"].__aexit__(None, None, None)
 
 
+# ---------------------------------------------------------------------------
+# Session ops. A persistent session anchors on a notebook_id (and, for
+# follow-up questions, a conversation_id). These open the client, address the
+# EXISTING notebook by id, and perform a single re-entrant operation — they
+# never create a notebook (that happens on the session's first `job`).
+# ---------------------------------------------------------------------------
+def _require_notebook_id(p: dict[str, Any]) -> str:
+    notebook_id = p.get("notebookId")
+    if not notebook_id:
+        raise ValueError("notebookId is required for this op")
+    return str(notebook_id)
+
+
+def _collect_refs(result: Any) -> list[dict[str, Any]]:
+    refs = []
+    for r in getattr(result, "references", None) or []:
+        refs.append(
+            {
+                "sourceId": getattr(r, "source_id", None),
+                "quote": getattr(r, "quote", None),
+            }
+        )
+    return refs
+
+
+async def op_ask(p: dict[str, Any]) -> dict[str, Any]:
+    """A follow-up question on a session's conversation.
+
+    If the stored conversation_id is stale (Google dropped it), the ask fails
+    and we RETRY once without it — starting a fresh conversation on the SAME
+    notebook (the notebook is preserved; only the thread restarts).
+    """
+    notebook_id = _require_notebook_id(p)
+    prompt = str(p["prompt"])
+    timeout_sec = float(p.get("timeoutSec", 1800))
+    conversation_id = p.get("conversationId") or None
+
+    await emit({"event": "progress", "op": None, "data": {"stage": "executing_prompt"}})
+    ctx, client = await _client_with(Path(p["sessionPath"]), min(timeout_sec, 300))
+    try:
+        try:
+            result = await client.chat.ask(
+                notebook_id, prompt, conversation_id=conversation_id
+            )
+        except Exception as exc:  # noqa: BLE001 - retry a stale conversation once
+            if not conversation_id:
+                raise
+            # A dead conversation_id must not lose the user's question: retry
+            # on the same notebook with a fresh thread.
+            await emit(
+                {"event": "log", "op": None, "data": {"note": "conversation expired; retrying fresh"}}
+            )
+            result = await client.chat.ask(notebook_id, prompt)
+        await emit({"event": "progress", "op": None, "data": {"stage": "prompt_done"}})
+        return {
+            "email": await client.get_account_email(live_fallback=False),
+            "notebookId": notebook_id,
+            "conversationId": getattr(result, "conversation_id", None),
+            "turnNumber": getattr(result, "turn_number", None),
+            "answer": getattr(result, "answer", "") or "",
+            "references": _collect_refs(result),
+            "checkedAt": now_iso(),
+        }
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
+async def op_add_source(p: dict[str, Any]) -> dict[str, Any]:
+    """Append files to a session's existing notebook and wait for processing."""
+    notebook_id = _require_notebook_id(p)
+    wait_sec = float(p.get("waitSec", 600))
+    timeout_sec = float(p.get("timeoutSec", 1800))
+    srcs = p.get("sources") or []
+
+    ctx, client = await _client_with(Path(p["sessionPath"]), min(timeout_sec, 300))
+    try:
+        resolved: list[dict[str, Any]] = []
+        source_ids: list[str] = []
+        for i, s in enumerate(srcs):
+            sp = Path(str(s["path"]))
+            if not sp.is_file():
+                raise FileNotFoundError(f"source file not found: {sp}")
+            title = str(s.get("title") or sp.name)
+            await emit(
+                {"event": "progress", "op": None, "data": {"stage": "uploading_sources", "index": i}}
+            )
+            uploaded = await client.sources.add_file(
+                notebook_id,
+                sp,
+                mime_type=s.get("mediaType") or None,
+                title=title,
+            )
+            # notebooklm-py's Source model uses `.id` (older builds `.source_id`).
+            sid = getattr(uploaded, "source_id", None) or getattr(uploaded, "id", None)
+            if not sid:
+                raise RuntimeError(f"upload for {title!r} returned no source id")
+            await emit(
+                {"event": "progress", "op": None, "data": {"stage": "upload_done", "title": title}}
+            )
+            resolved.append({"title": title, "sourceId": sid, "reused": False})
+            source_ids.append(sid)
+
+        if source_ids:
+            await emit({"event": "progress", "op": None, "data": {"stage": "waiting_for_processing"}})
+        for i, sid in enumerate(source_ids):
+            await client.sources.wait_until_ready(notebook_id, sid, timeout=wait_sec)
+            await emit(
+                {"event": "progress", "op": None, "data": {"stage": "processing_done", "index": i + 1}}
+            )
+
+        return {
+            "email": await client.get_account_email(live_fallback=False),
+            "notebookId": notebook_id,
+            "sources": resolved,
+            "sourceIds": source_ids,
+            "checkedAt": now_iso(),
+        }
+    finally:
+        await ctx.__aexit__(None, None, None)
+
+
 OPS = {
     "ping": op_ping,
     "validate": op_validate,
     "verify": op_verify,
     "job": op_job,
     "artifact": op_artifact,
+    "ask": op_ask,
+    "add_source": op_add_source,
 }
 
 

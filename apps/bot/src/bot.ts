@@ -80,6 +80,7 @@ async function main(): Promise<void> {
     { command: "mindmap", description: "نقشه ذهنی" },
     { command: "datatable", description: "جدول داده" },
     { command: "cookie", description: "به‌روزرسانی کوکی گوگل" },
+    { command: "finish", description: "پایان جلسه" },
     { command: "cancel", description: "لغو جاب جاری" },
   ]);
 
@@ -138,11 +139,16 @@ async function main(): Promise<void> {
           title: a.title,
           files: a.sources,
           output: a.output !== "answer" ? a.output : undefined,
+          mode: a.mode,
+          sessionId: a.sessionId ?? undefined,
+          chatId: a.chatId ?? undefined,
         });
-        flows.markSubmitted(chatId, job.id);
+        flows.markSubmitted(chatId, job.id, job.sessionId);
         cleanChatTemps(chatId); // uploaded; temp copies no longer needed
         send(chatId, botMessages.submitted);
-        log(`chat ${chatId}: job ${job.id} created`);
+        log(
+          `chat ${chatId}: job ${job.id} created (mode=${a.mode}${a.sessionId ? `, session=${a.sessionId}` : ""})`,
+        );
       } catch (e) {
         flows.onJobSubmitFailed(chatId);
         cleanChatTemps(chatId);
@@ -214,6 +220,23 @@ async function main(): Promise<void> {
         } else {
           send(chatId, botMessages.apiDown);
           log(`chat ${chatId}: importCookies failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+    if (a.type === "finishSession") {
+      try {
+        const r = await api.finishSession(a.sessionId);
+        send(chatId, botMessages.sessionFinished);
+        log(`chat ${chatId}: session ${a.sessionId} finished → ${r.status}`);
+      } catch (e) {
+        if (e instanceof NloApiError) {
+          if (e.unreachable) send(chatId, botMessages.apiDown);
+          else if (e.status === 401 || e.status === 403) send(chatId, botMessages.authBad);
+          else send(chatId, `⚠️ ${e.message}`);
+          log(`chat ${chatId}: finishSession failed (HTTP ${e.status})`);
+        } else {
+          send(chatId, botMessages.apiDown);
+          log(`chat ${chatId}: finishSession failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
     }
@@ -305,9 +328,10 @@ async function main(): Promise<void> {
   const handleJobResult = async (chatId: number, job: BotJobSummary): Promise<void> => {
     switch (job.status) {
       case "SUCCEEDED": {
-        // Read the kind BEFORE jobDone resets the flow (output → "answer").
+        // Read the kind BEFORE jobDone leaves SUBMITTED (follow-ups keep
+        // output; a failed create rolls back to "answer" via resetToIdle).
         const output = flows.flowFor(chatId).output ?? "answer";
-        flows.jobDone(chatId);
+        flows.jobDone(chatId, true);
         // Artifact jobs: deliver the generated file(s)/text, else fall back to
         // the answer markdown. The flow's `output` drives the kind selection.
         if (output !== "answer") {
@@ -326,19 +350,19 @@ async function main(): Promise<void> {
         return;
       }
       case "FAILED": {
-        flows.jobDone(chatId);
+        flows.jobDone(chatId, false);
         send(chatId, jobFailedMessage(job.errorClass ?? "unknown"));
         log(`chat ${chatId}: job ${job.id} failed (${job.errorClass ?? "unknown"})`);
         return;
       }
       case "NEEDS_ATTENTION": {
-        flows.jobDone(chatId);
+        flows.jobDone(chatId, false);
         send(chatId, botMessages.needsAttention);
         log(`chat ${chatId}: job ${job.id} needs attention`);
         return;
       }
       case "CANCELLED": {
-        flows.jobDone(chatId);
+        flows.jobDone(chatId, false);
         send(chatId, botMessages.cancelled);
         log(`chat ${chatId}: job ${job.id} cancelled externally`);
         return;
@@ -440,6 +464,8 @@ async function main(): Promise<void> {
           for (const a of flows.handleHelp(chatId)) await exec(chatId, a);
         } else if (base === "/cookie") {
           for (const a of flows.handleCookieCommand(chatId)) await exec(chatId, a);
+        } else if (base === "/finish") {
+          for (const a of flows.handleFinish(chatId)) await exec(chatId, a);
         } else if (base === "/cancel") {
           for (const a of flows.handleCancel(chatId)) await exec(chatId, a);
         } else {
@@ -556,7 +582,7 @@ async function main(): Promise<void> {
       const jobId = f.jobId;
       if (!jobId) continue;
       if (f.jobDeadline !== null && Date.now() > f.jobDeadline) {
-        flows.jobDone(chatId);
+        flows.jobDone(chatId, false);
         send(chatId, botMessages.jobTimeout);
         log(`chat ${chatId}: job ${jobId} timed out`);
         continue;

@@ -240,6 +240,14 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         level: CapLevel.implementedUntestedLive,
         note: "audio/infographic/slide/report/quiz/flashcards/mindmap/data-table via notebooklm-py",
       },
+      followUpAsk: {
+        level: CapLevel.implementedUntestedLive,
+        note: "op_ask: a follow-up question on the session's conversation",
+      },
+      addSource: {
+        level: CapLevel.implementedUntestedLive,
+        note: "op_add_source: append files to the session's notebook",
+      },
       cancelJob: {
         level: CapLevel.experimental,
         note: "kills the worker; in-flight server op may still finish",
@@ -469,7 +477,18 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
     const output = req.output ?? "answer";
     const isArtifact = output !== "answer";
-    const notebookTitle = `nlo-${req.jobId.slice(0, 16)}`;
+    // Session anchoring: when a session is bound, address the session's
+    // notebook (by id when known, else by its stable title) instead of the
+    // per-job `nlo-<jobId>` title. `notebookId` stays null until the session's
+    // first `job`/`create` succeeds (the runner then stores it on the session).
+    const isSession = Boolean(req.sessionId);
+    const notebookTitle = isSession
+      ? req.notebookTitle ?? `nlo-${req.jobId.slice(0, 16)}`
+      : `nlo-${req.jobId.slice(0, 16)}`;
+    const notebookId = isSession ? req.notebookId ?? null : null;
+    const route = req.tunnel
+      ? { nodeId: req.tunnel.nodeId, host: req.tunnel.host, port: req.tunnel.port }
+      : null;
     const w = new WorkerSupervisor({
       pythonBin: this.opts.pythonBin,
       workerPath: this.opts.workerPath,
@@ -499,6 +518,90 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     this.active.set(req.jobId, w);
     try {
       await w.start();
+      if (req.mode === "ask") {
+        // A follow-up question on the session's conversation (same notebook).
+        const r = await w.request<{
+          email: string;
+          notebookId: string | null;
+          conversationId: string | null;
+          turnNumber: number | null;
+          answer: string;
+          references: { sourceId: string | null; quote: string | null }[];
+          checkedAt: string;
+        }>("ask", {
+          sessionPath,
+          notebookId: req.notebookId ?? notebookId,
+          conversationId: req.conversationId ?? null,
+          prompt: req.prompt,
+          timeoutSec: Math.floor((this.opts.jobTimeoutMs ?? 30 * 60_000) / 1000),
+        });
+        if (!r.answer || r.answer.trim().length === 0) {
+          throw new ProviderFailure({
+            failureClass: "provider",
+            message: "provider returned an empty answer; not reporting success",
+            ambiguous: true,
+            needsReauth: false,
+          });
+        }
+        req.onProgress(100, "retrieved follow-up answer");
+        return {
+          answerMarkdown: r.answer,
+          providerMeta: {
+            simulated: false,
+            provider: this.name,
+            email: r.email,
+            notebookId: r.notebookId,
+            mode: "ask",
+            conversationId: r.conversationId,
+            turnNumber: r.turnNumber,
+            references: r.references,
+            checkedAt: r.checkedAt,
+            route,
+          },
+          artifacts: [],
+          notebookId: r.notebookId ?? null,
+          notebookTitle,
+          conversationId: r.conversationId ?? null,
+        };
+      }
+      if (req.mode === "add_source") {
+        // Append files to the session's existing notebook and wait for them.
+        const r = await w.request<{
+          email: string;
+          notebookId: string | null;
+          sources: { title: string; sourceId: string | null; reused: boolean }[];
+          sourceIds: string[];
+          checkedAt: string;
+        }>("add_source", {
+          sessionPath,
+          notebookId: req.notebookId ?? notebookId,
+          sources: req.sources.map((s) => ({
+            path: s.path,
+            title: s.title,
+            mediaType: s.mediaType,
+          })),
+          waitSec: 1800,
+          timeoutSec: Math.floor((this.opts.jobTimeoutMs ?? 30 * 60_000) / 1000),
+        });
+        req.onProgress(100, "sources added to notebook");
+        return {
+          answerMarkdown: "منابع به نوت‌بوک اضافه شد",
+          providerMeta: {
+            simulated: false,
+            provider: this.name,
+            email: r.email,
+            notebookId: r.notebookId,
+            mode: "add_source",
+            sources: r.sources,
+            sourceIds: r.sourceIds,
+            checkedAt: r.checkedAt,
+            route,
+          },
+          artifacts: [],
+          notebookId: r.notebookId ?? null,
+          notebookTitle,
+        };
+      }
       if (isArtifact) {
         const r = await w.request<{
           email: string;
@@ -518,6 +621,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
           })),
           prompt: req.prompt,
           notebookTitle,
+          notebookId,
           waitSec: 1800,
           timeoutSec: Math.floor((this.opts.jobTimeoutMs ?? 30 * 60_000) / 1000),
         });
@@ -543,13 +647,13 @@ export class PythonWorkerProvider implements NotebookLMProvider {
             output,
             kind: r.kind,
             checkedAt: r.checkedAt,
-            route: req.tunnel
-              ? { nodeId: req.tunnel.nodeId, host: req.tunnel.host, port: req.tunnel.port }
-              : null,
+            route,
           },
           artifacts: [
             { name: r.artifact.name, mediaType: r.artifact.mediaType, path: r.artifact.path },
           ],
+          notebookId: r.notebookId ?? null,
+          notebookTitle: r.notebookTitle,
         };
       }
       const r = await w.request<{
@@ -571,6 +675,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         })),
         prompt: req.prompt,
         notebookTitle,
+        notebookId,
         waitSec: 1800,
         timeoutSec: Math.floor((this.opts.jobTimeoutMs ?? 30 * 60_000) / 1000),
       });
@@ -597,11 +702,12 @@ export class PythonWorkerProvider implements NotebookLMProvider {
           turnNumber: r.turnNumber,
           references: r.references,
           checkedAt: r.checkedAt,
-          route: req.tunnel
-            ? { nodeId: req.tunnel.nodeId, host: req.tunnel.host, port: req.tunnel.port }
-            : null,
+          route,
         },
         artifacts: [],
+        notebookId: r.notebookId ?? null,
+        notebookTitle: r.notebookTitle,
+        conversationId: r.conversationId ?? null,
       };
     } catch (e) {
       if (e instanceof ProviderFailure) throw e;

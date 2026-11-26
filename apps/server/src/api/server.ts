@@ -15,6 +15,7 @@ import { registerAccountRoutes } from "./routes/accounts.js";
 import { registerProxyRoutes } from "./routes/proxies.js";
 import { registerProviderRoutes } from "./routes/providers.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerNotebookSessionRoutes } from "./routes/notebook-sessions.js";
 import { registerApiKeyRoutes } from "./routes/api-keys.js";
 
 /**
@@ -155,6 +156,23 @@ export async function buildApp(
       "The full job object also carries input, accountId/nodeId, attempt budget, " +
       "progress, error fields, and provenance.",
   });
+  app.addSchema({
+    $id: "NotebookSession",
+    type: "object",
+    required: ["id", "chatId", "notebookTitle", "status", "createdAt", "lastUsedAt"],
+    properties: {
+      id: { type: "string", example: "ns_0123456789abcdef0123456789abcdef" },
+      chatId: { type: "integer", description: "The chat that owns this session" },
+      accountId: { type: ["string", "null"], description: "Google account that serves the notebook" },
+      notebookId: { type: ["string", "null"], description: "Notebook id (bound after the first job)" },
+      notebookTitle: { type: "string", description: "Stable notebook title (reuse key)" },
+      conversationId: { type: ["string", "null"], description: "Active conversation id (follow-ups)" },
+      status: { type: "string", description: "open | closed | expired" },
+      createdAt: { type: "string", format: "date-time" },
+      lastUsedAt: { type: "string", format: "date-time" },
+      closedAt: { type: ["string", "null"], format: "date-time" },
+    },
+  });
 
   // --- consistent error handling ------------------------------------------
   interface FastifyErr extends Error {
@@ -217,6 +235,7 @@ export async function buildApp(
   registerProxyRoutes(app, ctx);
   registerProviderRoutes(app, ctx);
   registerSessionRoutes(app, ctx);
+  registerNotebookSessionRoutes(app, ctx);
   registerApiKeyRoutes(app, ctx);
   // Infrastructure API (accounts/proxies/sessions) requires the admin cookie
   // when credentials are configured. The guard is added last so the admin

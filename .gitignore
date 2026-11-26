@@ -40,3 +40,6 @@ vendor/
 # python
 __pycache__/
 *.pyc
+
+# Repomix merged-codebase artifact (accidental local build output)
+repomix-output.xml

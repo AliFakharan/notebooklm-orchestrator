@@ -189,12 +189,17 @@ export class MockProvider implements NotebookLMProvider {
     // Produce a deterministic artifact. For a non-answer `output` the file
     // matches the kind's extension/mediaType so the bot + artifact pipeline
     // can be exercised offline; "answer" keeps the historical sample .txt.
+    // A session `add_source` job appends files and produces no answer/artifact.
     const output = req.output ?? "answer";
+    const mode = req.mode ?? null;
     const dir = path.join(this.outDir, req.jobId);
     mkdirSync(dir, { recursive: true });
     let answerMarkdown = answer;
     let artifact: { name: string; mediaType: string; path: string };
-    if (output === "answer") {
+    if (mode === "add_source") {
+      answerMarkdown = "منابع به نوت‌بوک اضافه شد";
+      artifact = { name: "none", mediaType: "application/octet-stream", path: "" };
+    } else if (output === "answer") {
       const artifactName = `mock-sample-${randomUUID().slice(0, 8)}.txt`;
       const artifactPath = path.join(dir, artifactName);
       writeFileSync(
@@ -224,20 +229,31 @@ export class MockProvider implements NotebookLMProvider {
     this.checkpoint(req.signal);
     req.onProgress(100, "mock: done");
 
+    // A session `ask`/`create(answer)` op establishes/continues a
+    // conversation (mock returns a stable id); `add_source` and artifact
+    // generation do not.
+    const hasConversation = mode !== "add_source" && (mode === "ask" || output === "answer");
     return {
       answerMarkdown,
       providerMeta: {
         provider: "mock",
         simulated: true,
         output,
+        ...(mode ? { mode } : {}),
         steps: ["upload", "index", "ask", "artifacts"],
         sources: req.sources.map((s) => ({
           title: s.title,
           sourceId: null,
           reused: false,
         })),
+        ...(mode === "add_source"
+          ? { sourceIds: req.sources.map((_, i) => `mock-src-${i}`) }
+          : {}),
       },
-      artifacts: [artifact],
+      artifacts: mode === "add_source" ? [] : [artifact],
+      notebookId: `mock-nb-${req.jobId}`,
+      notebookTitle: req.notebookTitle ?? `nlo-${req.jobId.slice(0, 16)}`,
+      conversationId: hasConversation ? "mock-conv" : null,
     };
   }
 

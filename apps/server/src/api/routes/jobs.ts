@@ -5,9 +5,11 @@ import type { FastifyInstance } from "fastify";
 import {
   ApiError,
   ApiCodes,
+  JOB_MODES,
   JOB_OUTPUT_KINDS,
   MAX_SOURCES_PER_JOB,
   safeName,
+  type JobMode,
   type JobSource,
 } from "@nlo/shared";
 import { resolveWithin } from "@nlo/shared/resolve-within";
@@ -84,11 +86,17 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
         tags: ["jobs"],
         security: [{ bearerAuth: [] }],
         description:
-          "Creates a job from `multipart/form-data`: field `prompt` (string, required), " +
-          "optional field `title` (string), and repeated file parts (any " +
-          "NotebookLM-supported extension; up to the configured source limit). The " +
-          "Google account and proxy are chosen automatically at run time. Also " +
-          "reachable from loopback or with a valid admin cookie.",
+          "Creates a job from `multipart/form-data`: field `prompt` (string; required " +
+          "except for `add_source`/`artifact` modes), optional field `title` (string), and " +
+          "repeated file parts (any NotebookLM-supported extension; up to the configured " +
+          "source limit). The Google account and proxy are chosen automatically at run " +
+          "time. Also reachable from loopback or with a valid admin cookie.\n" +
+          "Persistent notebook session: optional fields `mode` (create | ask | " +
+          "add_source | artifact), `sessionId`, and `chatId`. Without `mode` the job " +
+          "behaves as before (a fresh notebook per job). `mode=create` opens a new " +
+          "session (pass `chatId`; `sessionId` is generated and returned). A follow-up " +
+          "mode (`ask`/`add_source`/`artifact`) must pass the `sessionId` of an OPEN " +
+          "session and runs against that session's notebook.",
         // No `body` schema on this route, by design: the multipart body is a
         // stream consumed via req.parts() (req.body stays undefined), so any
         // constraint-bearing body schema would 400 valid uploads. The field
@@ -101,9 +109,15 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
             properties: {
               id: { type: "string" },
               status: { type: "string" },
+              // Present only when the job is anchored to a notebook session.
+              sessionId: { type: ["string", "null"] },
+              mode: { type: ["string", "null"] },
+              notebookTitle: { type: ["string", "null"] },
+              notebookId: { type: ["string", "null"] },
             },
           },
           400: { $ref: "Error" },
+          409: { $ref: "Error" },
           413: { $ref: "Error" },
         },
       },
@@ -140,18 +154,120 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
         throw err;
       }
 
-      const prompt = (fields.prompt ?? "").trim();
-      if (!prompt) {
-        await rmAll(uploads.map((u) => u.tempPath));
-        throw new ApiError(ApiCodes.validation, "prompt is required", 400);
-      }
-
+      const rawPrompt = (fields.prompt ?? "").trim();
       // Account + proxy are chosen automatically at run time: the runner
       // prefers the default account (then the most recently successful eligible
       // one) and picks the healthiest enabled proxy. Reject only when there is
       // NO account at all (clearer than a runner failure later); the runner
       // re-checks eligibility + a live verified session.
       const title = (fields.title ?? "").trim() || null;
+
+      // --- persistent notebook session anchoring --------------------------
+      // Without `mode` the job is unanchored (historical behavior: a fresh
+      // notebook per job). With `mode` it anchors to a notebook session.
+      const rawMode = (fields.mode ?? "").trim();
+      const mode = rawMode === "" ? null : (rawMode as JobMode);
+      if (mode !== null && !(JOB_MODES as readonly string[]).includes(mode)) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(
+          ApiCodes.validation,
+          `invalid mode: ${rawMode} (allowed: ${JOB_MODES.join(", ")})`,
+          400,
+        );
+      }
+      const rawChatId = (fields.chatId ?? "").trim();
+      const chatId = rawChatId === "" ? null : Number.parseInt(rawChatId, 10);
+      if (rawChatId !== "" && (!Number.isInteger(chatId) || chatId! <= 0)) {
+        await rmAll(uploads.map((u) => u.tempPath));
+        throw new ApiError(ApiCodes.validation, "chatId must be a positive integer", 400);
+      }
+
+      const rmAllNow = () => rmAll(uploads.map((u) => u.tempPath));
+
+      // The prompt is required to ASK a question (legacy job, create, ask) but
+      // optional for `add_source` (append files) and `artifact` (generate a
+      // typed output) — the caption/message becomes the prompt there.
+      const promptOptional = mode === "add_source" || mode === "artifact";
+      const prompt = rawPrompt;
+      if (!promptOptional && !prompt) {
+        await rmAllNow();
+        throw new ApiError(ApiCodes.validation, "prompt is required", 400);
+      }
+
+      // Resolve the session this job anchors to (or null for unanchored).
+      // `create` opens a fresh session for the chat (resetting any open one);
+      // a follow-up mode must reference an existing OPEN session.
+      let anchored: {
+        sessionId: string;
+        mode: JobMode;
+        notebookId: string | null;
+        notebookTitle: string;
+      } | null = null;
+      if (mode !== null) {
+        const sessions = ctx.notebookSessions;
+        if (mode === "create") {
+          if (chatId === null) {
+            await rmAllNow();
+            throw new ApiError(ApiCodes.validation, "chatId is required to start a session", 400);
+          }
+          // Reset: a /start closes the chat's current open session so there is
+          // still exactly one open session per chat.
+          const existing = sessions.getOpenByChat(chatId);
+          if (existing) sessions.close(existing.id);
+          // Stable, unique title: the user's title + a short random suffix so a
+          // re-created session never collides with an older same-titled notebook.
+          const { randomBytes } = await import("node:crypto");
+          const suffix = randomBytes(4).toString("hex");
+          const base = title || "نوت‌بوک";
+          const created = sessions.create({
+            chatId,
+            notebookTitle: `${base} · NLO-${suffix}`,
+          });
+          anchored = {
+            sessionId: created.id,
+            mode: "create",
+            notebookId: null,
+            notebookTitle: created.notebookTitle,
+          };
+        } else {
+          const ref = (fields.sessionId ?? "").trim();
+          if (!ref) {
+            await rmAllNow();
+            throw new ApiError(
+              ApiCodes.validation,
+              `sessionId is required for mode ${mode}`,
+              400,
+            );
+          }
+          const session = sessions.get(ref);
+          if (!session) {
+            await rmAllNow();
+            throw new ApiError(ApiCodes.validation, `notebook session not found: ${ref}`, 400);
+          }
+          if (session.status !== "open") {
+            await rmAllNow();
+            throw new ApiError(
+              ApiCodes.invalidState,
+              `notebook session is ${session.status}; start a new one`,
+              409,
+            );
+          }
+          if (!session.notebookId) {
+            await rmAllNow();
+            throw new ApiError(
+              ApiCodes.invalidState,
+              `notebook session has no notebook yet; run the initial job first`,
+              409,
+            );
+          }
+          anchored = {
+            sessionId: session.id,
+            mode,
+            notebookId: session.notebookId,
+            notebookTitle: session.notebookTitle,
+          };
+        }
+      }
 
       // Optional output kind (default "answer") + language. Validate the kind
       // against the canonical set at creation time (fail fast with 400).
@@ -239,6 +355,11 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
           preferredNodeId: null,
           output,
           language,
+          // Session anchoring: the runner resolves the session once and threads
+          // its notebook/conversation/account into the provider call.
+          sessionId: anchored?.sessionId ?? null,
+          mode: anchored?.mode ?? null,
+          chatId: chatId,
         },
         configSnapshot: {
           provider: ctx.provider.name,
@@ -279,7 +400,16 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
         await rmAll(uploads.map((u) => u.tempPath));
       }
 
-      return reply.code(201).send({ id: job.id, status: job.status });
+      return reply.code(201).send({
+        id: job.id,
+        status: job.status,
+        // Present when the job anchors to a notebook session: lets the bot
+        // remember the session (follow-ups / /finish) and the stable title.
+        sessionId: anchored?.sessionId ?? null,
+        mode: anchored?.mode ?? null,
+        notebookTitle: anchored?.notebookTitle ?? null,
+        notebookId: anchored?.notebookId ?? null,
+      });
     },
   );
 

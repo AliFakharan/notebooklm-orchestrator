@@ -5,6 +5,7 @@ import { AccountsRepo } from "./domain/accounts.repo.js";
 import { ApiKeyRepo } from "./domain/api-keys.repo.js";
 import { AuthSessionsRepo } from "./domain/auth-sessions.repo.js";
 import { JobsRepo } from "./domain/jobs.repo.js";
+import { NotebookSessionsRepo } from "./domain/notebook-sessions.repo.js";
 import { ProxiesRepo } from "./domain/proxies.repo.js";
 import { SessionChecksRepo } from "./domain/session-checks.repo.js";
 import { SecretVault } from "./secrets/vault.js";
@@ -17,6 +18,7 @@ import { ProxyManager } from "./proxy/proxy-manager.js";
 import { fetchThroughTunnel } from "./proxy/connect-proxy.js";
 import { JobRunner } from "./queue/job-runner.js";
 import { Queue } from "./queue/queue.js";
+import { NotebookSessionSweeper } from "./queue/notebook-session-sweeper.js";
 import { createAdminAuth, type AdminAuth } from "./api/admin-auth.js";
 import { AuthGuardImpl, type AuthGuard } from "./auth/auth-guard.js";
 import { BaleNotifier } from "./notify/bale.js";
@@ -36,6 +38,8 @@ export interface AppContext {
   sessionChecks: SessionChecksRepo;
   proxies: ProxiesRepo;
   jobs: JobsRepo;
+  /** Persistent notebook sessions (one open notebook per chat). */
+  notebookSessions: NotebookSessionsRepo;
   provider: NotebookLMProvider;
   runtime: ProxyRuntime;
   egress: MockProviderEgress;
@@ -54,6 +58,12 @@ export interface AppContext {
    * close.
    */
   keeper: SessionKeeper | null;
+  /**
+   * Background idle-TTL sweeper for persistent notebook sessions. Null when
+   * disabled (NLO_SESSION_TTL_MS=0 or a one-shot operator command). Stopped
+   * before the queue on close.
+   */
+  sessionSweeper: NotebookSessionSweeper | null;
   /**
    * In-flight async cookie imports (202 + background verify). close() DRAINS
    * these before closing the provider/DB so a restart never abandons a
@@ -94,6 +104,7 @@ export function createAppContext(
   const apiKeys = new ApiKeyRepo(db);
   const proxies = new ProxiesRepo(db);
   const jobs = new JobsRepo(db);
+  const notebookSessions = new NotebookSessionsRepo(db);
 
   // One shared auth lock per account (import/verify/keeper serialize on it).
   const authGuard = new AuthGuardImpl();
@@ -201,6 +212,7 @@ export function createAppContext(
     vault,
     egress,
     jobsDir: paths.jobsDir,
+    notebookSessions,
     log: (msg) => {
       // Structured-ish, redaction is applied at call sites.
       console.log(`[nlo] ${msg}`);
@@ -242,6 +254,24 @@ export function createAppContext(
     );
   }
 
+  // Background notebook-session TTL sweeper: expire idle `open` sessions.
+  // Runs for both providers (a session can be anchored under the mock too);
+  // disabled when the TTL is 0 or in a one-shot operator command.
+  let sessionSweeper: NotebookSessionSweeper | null = null;
+  if (startKeeper && config.notebookSessionTtlMs > 0) {
+    sessionSweeper = new NotebookSessionSweeper({
+      sessions: notebookSessions,
+      ttlMs: config.notebookSessionTtlMs,
+      intervalMs: 60_000,
+      log: (msg) => console.log(`[nlo:session-sweeper] ${msg}`),
+    });
+    sessionSweeper.start();
+  } else {
+    console.log(
+      `[nlo] notebook session sweeper disabled (startKeeper=${startKeeper}, ttl=${config.notebookSessionTtlMs}ms)`,
+    );
+  }
+
   return {
     config,
     db,
@@ -251,6 +281,7 @@ export function createAppContext(
     sessionChecks,
     proxies,
     jobs,
+    notebookSessions,
     provider,
     runtime,
     egress,
@@ -259,13 +290,16 @@ export function createAppContext(
     queue,
     authGuard,
     keeper,
+    sessionSweeper,
     importInFlight,
     adminAuth: createAdminAuth(config),
     apiKeys,
     close: async () => {
-      // Stop the keeper first and DRAIN any in-flight verify so we never
-      // close the DB (or the worker/tunnel) while a cycle is mid-write.
+      // Stop the keeper + session sweeper first and DRAIN any in-flight verify
+      // so we never close the DB (or the worker/tunnel) while a cycle is
+      // mid-write.
       await keeper?.stop();
+      sessionSweeper?.stop();
       await queue.stop();
       // Drain in-flight async cookie imports (background verifies) BEFORE the
       // provider/worker and DB go away, so a restart never abandons one.

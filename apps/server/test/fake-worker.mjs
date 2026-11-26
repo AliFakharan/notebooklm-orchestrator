@@ -153,10 +153,48 @@ process.stdin.on("data", (chunk) => {
           ok: true,
           result: {
             email: "fake@example.com",
-            notebookId: "nb_fake",
+            notebookId: req.params.notebookId ?? "nb_fake",
             notebookTitle: req.params.notebookTitle ?? "nlo-fake",
             kind,
             artifact: { name, mediaType: media, path: p },
+            checkedAt: new Date().toISOString(),
+          },
+        });
+        continue;
+      }
+      if (req.op === "ask") {
+        // A follow-up question on the session's conversation. The fake echoes
+        // the prompt and returns a deterministic conversation id.
+        send({
+          id: req.id,
+          ok: true,
+          result: {
+            email: "fake@example.com",
+            notebookId: req.params.notebookId ?? "nb_fake",
+            conversationId: "conv_fake_followup",
+            turnNumber: 2,
+            answer: `Fake follow-up for: ${req.params.prompt ?? ""}`,
+            references: [],
+            checkedAt: new Date().toISOString(),
+          },
+        });
+        continue;
+      }
+      if (req.op === "add_source") {
+        // Append files to the session notebook; echo the resolved sources.
+        const srcs = Array.isArray(req.params.sources) ? req.params.sources : [];
+        send({
+          id: req.id,
+          ok: true,
+          result: {
+            email: "fake@example.com",
+            notebookId: req.params.notebookId ?? "nb_fake",
+            sources: srcs.map((s, i) => ({
+              title: s.title ?? `src${i}`,
+              sourceId: `fake-src-${i}`,
+              reused: false,
+            })),
+            sourceIds: srcs.map((_, i) => `fake-src-${i}`),
             checkedAt: new Date().toISOString(),
           },
         });

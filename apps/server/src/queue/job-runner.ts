@@ -8,6 +8,7 @@ import { resolveWithin } from "@nlo/shared/resolve-within";
 import type { Job, FailureClass } from "@nlo/shared";
 import type { JobsRepo } from "../domain/jobs.repo.js";
 import type { AccountRow, AccountsRepo } from "../domain/accounts.repo.js";
+import type { NotebookSessionsRepo } from "../domain/notebook-sessions.repo.js";
 import type { AuthSessionsRepo } from "../domain/auth-sessions.repo.js";
 import type { ProxiesRepo } from "../domain/proxies.repo.js";
 import { JobArchive } from "../domain/archive.js";
@@ -51,6 +52,12 @@ export interface JobRunnerDeps {
   vault: SecretVault;
   egress: ProviderEgress;
   jobsDir: string;
+  /**
+   * Persistent notebook-session anchor. Optional: when absent (legacy test
+   * harnesses) session-scoped jobs are treated as unanchored. Wired in
+   * createAppContext.
+   */
+  notebookSessions?: NotebookSessionsRepo;
   log: (msg: string) => void;
   sleep?: (ms: number) => Promise<void>;
   rng?: () => number;
@@ -65,6 +72,22 @@ export interface JobRunnerDeps {
 const sleepDefault = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const TERMINAL = ["SUCCEEDED", "FAILED", "CANCELLED"];
+
+/**
+ * A resolved session anchor for an anchored job (sessionId + mode present).
+ * The runner loads it ONCE per job: the session does not change while the job
+ * runs, and on a retry the same anchor re-applies. `pinnedAccountId` is the
+ * session's owner for follow-up modes (the notebook belongs to that account);
+ * `create` pins nothing (the owner is bound on success).
+ */
+interface SessionAnchor {
+  sessionId: string;
+  mode: "create" | "ask" | "add_source" | "artifact";
+  notebookId: string | null;
+  notebookTitle: string | null;
+  conversationId: string | null;
+  pinnedAccountId: string | null;
+}
 
 export class JobRunner {
   private active = new Map<string, AbortController>();
@@ -101,6 +124,16 @@ export class JobRunner {
     this.active.set(jobId, controller);
     const archive = new JobArchive(this.d.jobsDir, jobId);
 
+    // Resolve the session anchor ONCE, before the retry loop. The session does
+    // not change while this job runs (and re-applies identically on retry). If
+    // the session is closed/expired — or has no notebook yet for a follow-up
+    // mode — the job fails closed HERE (no provider call, no notebook work).
+    const anchor = this.resolveSessionAnchor(jobId, archive);
+    if (anchor === "fail") {
+      this.finalizeArchive(jobId, archive);
+      return this.d.jobs.getOrThrow(jobId);
+    }
+
     try {
       if (initial.status === "CREATED") {
         // --- VALIDATING ---------------------------------------------------
@@ -125,7 +158,13 @@ export class JobRunner {
         }
         let account: AccountRow;
         try {
-          account = this.selectAccount(this.d.jobs.getOrThrow(jobId));
+          // A follow-up session op is pinned to the session's owner: its
+          // notebook belongs to that account, so another account's selection
+          // would look for the notebook in the wrong place.
+          account = this.selectAccount(
+            this.d.jobs.getOrThrow(jobId),
+            anchor?.pinnedAccountId ?? null,
+          );
         } catch {
           this.finalizeArchive(jobId, archive);
           return this.d.jobs.getOrThrow(jobId); // selectAccount failed the job
@@ -204,6 +243,11 @@ export class JobRunner {
             prompt: job.input.prompt,
             output: job.input.output ?? "answer",
             language: job.input.language ?? null,
+            sessionId: job.input.sessionId ?? null,
+            mode: job.input.mode ?? null,
+            notebookId: anchor?.notebookId ?? null,
+            notebookTitle: anchor?.notebookTitle ?? null,
+            conversationId: anchor?.conversationId ?? null,
             sources: job.input.sources
               .map((s) => ({
                 path: this.sourcePathInArchive(jobId, s.storageName, s.size),
@@ -240,6 +284,7 @@ export class JobRunner {
             resultProvenance: sim === true ? "mock" : sim === false ? "real" : "unknown",
           });
           if (result.answerMarkdown) archive.writeAnswer(result.answerMarkdown);
+          this.applySessionAnchor(jobId, archive, job.input, anchor, account.id, result);
           this.logEvent(jobId, archive, "succeeded", "job completed");
           this.cleanupSources(jobId, archive);
           this.finalizeArchive(jobId, archive);
@@ -291,7 +336,12 @@ export class JobRunner {
 
   private validate(jobId: string, archive: JobArchive): boolean {
     const job = this.d.jobs.getOrThrow(jobId);
-    if (!job.input.prompt || !job.input.prompt.trim()) {
+    // A prompt is required to ASK a question (legacy job, create, ask).
+    // `add_source` only appends files and `artifact` generates a typed output
+    // from the notebook, so the prompt (a caption/instruction) is optional for
+    // those — the provider/worker ignores an empty prompt for them.
+    const promptOptional = job.input.mode === "add_source" || job.input.mode === "artifact";
+    if (!promptOptional && (!job.input.prompt || !job.input.prompt.trim())) {
       this.d.jobs.setStatus(jobId, "FAILED", {
         errorClass: "invalid_input",
         errorMessage: "prompt is empty",
@@ -351,7 +401,125 @@ export class JobRunner {
    *    when the sessions repo is present — holding an AUTHENTICATED session
    *    verified within the TTL. A DB flag alone is never sufficient.
    */
-  private selectAccount(job: Job): AccountRow {
+  /**
+   * Load the session an anchored job targets, once. Returns the anchor, or
+   * `null` when the job is not anchored (or the repo is not wired), or `"fail"`
+   * when the session is unusable (the job is FAILED here, fail-closed).
+   */
+  private resolveSessionAnchor(jobId: string, archive: JobArchive): SessionAnchor | "fail" | null {
+    const job = this.d.jobs.getOrThrow(jobId);
+    const sessionId = job.input.sessionId;
+    const mode = job.input.mode;
+    if (!sessionId || !mode) return null;
+    const repo = this.d.notebookSessions;
+    if (!repo) return null; // legacy harness without the repo: treat as unanchored
+    const session = repo.get(sessionId);
+    if (!session) {
+      this.failAnchoredJob(jobId, archive, "invalid_input", `notebook session not found: ${sessionId}`);
+      return "fail";
+    }
+    if (session.status !== "open") {
+      this.failAnchoredJob(
+        jobId,
+        archive,
+        "invalid_input",
+        `notebook session is ${session.status}; start a new one with /start`,
+      );
+      return "fail";
+    }
+    // Follow-up/anchor modes require an already-created notebook; `create`
+    // creates it (notebookId may still be null).
+    if ((mode === "ask" || mode === "add_source" || mode === "artifact") && !session.notebookId) {
+      this.failAnchoredJob(
+        jobId,
+        archive,
+        "invalid_input",
+        "notebook session has no notebook yet; run the initial job first",
+      );
+      return "fail";
+    }
+    return {
+      sessionId,
+      mode,
+      notebookId: session.notebookId ?? null,
+      notebookTitle: session.notebookTitle,
+      conversationId: session.conversationId ?? null,
+      // `create` binds the owner on success; the rest are pinned to it.
+      pinnedAccountId: mode === "create" ? null : (session.accountId ?? null),
+    };
+  }
+
+  /**
+   * Fail an anchored job (the session cannot serve it). Fail-closed. Runs
+   * before the job has entered VALIDATING (the anchor is resolved up front),
+   * so advance CREATED -> VALIDATING first: the state machine only permits
+   * VALIDATING/QUEUED/... -> FAILED, never CREATED -> FAILED.
+   */
+  private failAnchoredJob(jobId: string, archive: JobArchive, errorClass: FailureClass, message: string): void {
+    if (this.d.jobs.getOrThrow(jobId).status === "CREATED") {
+      this.d.jobs.setStatus(jobId, "VALIDATING");
+    }
+    this.d.jobs.setStatus(jobId, "FAILED", { errorClass, errorMessage: message });
+    this.logEvent(jobId, archive, "session_unavailable", message);
+  }
+
+  /**
+   * After a SUCCESSFUL anchored job, write the outcome back onto the session:
+   *  - `create`        -> bind the notebook + conversation + owning account;
+   *  - `ask`           -> advance the conversation (a stale-conv retry returns
+   *                       the fresh thread id) and keep the notebook;
+   *  - `add_source` / `artifact` -> just refresh the idle TTL.
+   * Bookkeeping never fails an already-succeeded job (logged only).
+   */
+  private applySessionAnchor(
+    jobId: string,
+    archive: JobArchive,
+    input: import("@nlo/shared").JobInput,
+    anchor: SessionAnchor | null,
+    accountId: string,
+    result: import("../providers/types.js").ProviderJobResult,
+  ): void {
+    const repo = this.d.notebookSessions;
+    if (!repo || !anchor) return;
+    try {
+      if (anchor.mode === "create") {
+        repo.touch(anchor.sessionId, {
+          notebookId: result.notebookId ?? undefined,
+          conversationId: result.conversationId ?? undefined,
+          accountId,
+        });
+        this.logEvent(
+          jobId,
+          archive,
+          "session_created",
+          `session ${anchor.sessionId} anchored to notebook ${result.notebookId ?? "?"}`,
+        );
+      } else if (anchor.mode === "ask") {
+        repo.touch(anchor.sessionId, {
+          conversationId: result.conversationId ?? undefined,
+          notebookId: result.notebookId ?? undefined,
+        });
+        this.logEvent(
+          jobId,
+          archive,
+          "session_followed_up",
+          `session ${anchor.sessionId} conversation ${result.conversationId ?? "(kept)"}`,
+        );
+      } else {
+        repo.touch(anchor.sessionId, {});
+        this.logEvent(jobId, archive, "session_touched", `session ${anchor.sessionId} refreshed`);
+      }
+    } catch (err) {
+      this.d.log(`session bookkeeping failed for ${jobId}: ${redact(String(err))}`);
+    }
+    void input;
+  }
+
+  private selectAccount(job: Job, pinnedAccountId?: string | null): AccountRow {
+    // A pinned account (from a session anchor) is honored STRICTLY, exactly
+    // like a job's preferredAccountId: if it is not currently eligible the job
+    // fails with a clear auth error rather than silently switching accounts.
+    const preferred = pinnedAccountId ?? job.input.preferredAccountId;
     const eligibleIds = this.d.sessions?.eligibleAccountIds() ?? null;
     const eligible = (a: AccountRow): boolean => {
       if (!a.enabled || a.status === "DISABLED") return false;
@@ -364,21 +532,21 @@ export class JobRunner {
       return true;
     };
 
-    if (job.input.preferredAccountId) {
-      const preferred = this.d.accounts.get(job.input.preferredAccountId);
-      if (preferred && eligible(preferred)) {
-        return preferred;
+    if (preferred) {
+      const chosen = this.d.accounts.get(preferred);
+      if (chosen && eligible(chosen)) {
+        return chosen;
       }
-      const why = !preferred
+      const why = !chosen
         ? "not found"
-        : !preferred.enabled || preferred.status === "DISABLED"
+        : !chosen.enabled || chosen.status === "DISABLED"
           ? "not enabled / disabled"
           : eligibleIds !== null
             ? "session not verified (re-authentication required)"
             : "not enabled / disabled / auth-required";
       this.d.jobs.setStatus(job.id, "FAILED", {
         errorClass: "auth",
-        errorMessage: `requested account "${preferred?.label ?? job.input.preferredAccountId}" is not usable: ${why}`,
+        errorMessage: `requested account "${chosen?.label ?? preferred}" is not usable: ${why}`,
       });
       this.d.jobs.appendEvent(job.id, "no_account", `requested account not usable: ${why}`);
       throw new Error(`requested account not usable: ${why}`);

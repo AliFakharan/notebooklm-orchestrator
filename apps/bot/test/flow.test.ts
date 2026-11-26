@@ -127,37 +127,50 @@ describe("flow state machine", () => {
     expect(fm.handleSource(2, [file(3)])[0]).toMatchObject({ text: botMessages.askTitle });
   });
 
-  it("enforces the 5 jobs / 24 h limit per chat, then allows again after the window", () => {
-    const { fm, runToJob, advance, file } = setup();
-    for (let i = 0; i < 5; i++) {
-      const act = runToJob(1);
+  it("enforces the 5 jobs / 24 h limit per chat (across create + follow-ups), then allows again", () => {
+    const { fm, runToJob, advance } = setup();
+    // 1st: a fresh create job (IDLE → … → SUBMITTED).
+    let act = runToJob(1);
+    expect(act.type).toBe("createJob");
+    fm.markSubmitted(1, "j0", "ns_0");
+    fm.jobDone(1, true); // create succeeds → IN_SESSION
+    expect(fm.peekState(1)).toBe("IN_SESSION");
+    // 2nd..5th: follow-up asks on the open session (each consumes quota too).
+    for (let i = 1; i < 5; i++) {
+      act = fm.handleText(1, `سوال ${i}`)[0]!;
       expect(act.type).toBe("createJob");
       fm.markSubmitted(1, `j${i}`);
-      fm.jobDone(1);
+      fm.jobDone(1, true); // follow-up → IN_SESSION
+      expect(fm.peekState(1)).toBe("IN_SESSION");
     }
-    // 6th attempt inside the same window:
-    fm.handleSource(1, [file(6)]);
-    fm.handleText(1, "عنوان");
-    expect(fm.handleText(1, "سوال")).toEqual([{ type: "send", text: botMessages.limit }]);
+    // 6th attempt inside the same window → limit.
+    expect(fm.handleText(1, "سوال ۶")).toEqual([{ type: "send", text: botMessages.limit }]);
     expect(fm.peekState(1)).toBe("IDLE");
 
-    // After the 24 h window slides, a new job is allowed.
+    // After the 24 h window slides, a new job is allowed (a fresh session).
     advance(25 * 60 * 60_000);
     expect(runToJob(1).type).toBe("createJob");
   });
 
   it("rolls back the quota when the submit fails", () => {
     const { fm, runToJob } = setup();
-    for (let i = 0; i < 4; i++) {
-      runToJob(1);
+    // 1st: a create; 2nd-4th: follow-up asks (each consumes a quota slot).
+    runToJob(1);
+    fm.markSubmitted(1, "j0", "ns_1");
+    fm.jobDone(1, true); // → IN_SESSION
+    for (let i = 1; i < 4; i++) {
+      const act = fm.handleText(1, `سوال ${i}`)[0]!;
+      expect(act.type).toBe("createJob");
       fm.markSubmitted(1, `j${i}`);
-      fm.jobDone(1);
+      fm.jobDone(1, true);
     }
-    const act = runToJob(1); // 5th: allowed
+    // 5th: a follow-up ask is allowed, then the submit fails (rolled back).
+    const act = fm.handleText(1, "سوال ۵")[0]!;
     expect(act.type).toBe("createJob");
     fm.onJobSubmitFailed(1); // API down → rolled back
     expect(fm.peekState(1)).toBe("IDLE");
-    expect(runToJob(1).type).toBe("createJob"); // 5th retry: still allowed
+    // A fresh create is still allowed (the failed slot was reclaimed).
+    expect(runToJob(1).type).toBe("createJob");
   });
 
   it("resets idle flows after the TTL", () => {
@@ -205,13 +218,16 @@ describe("artifact kind flow (/<kind>)", () => {
     expect(fm.handleSource(1, [file(1)])).toEqual([{ type: "send", text: botMessages.askTitle }]);
     expect(fm.handleText(1, "عنوان")).toEqual([{ type: "send", text: botMessages.askPrompt }]);
     const acts2 = fm.handleText(1, "سوال");
-    expect(acts2).toEqual([
+    expect(acts2).toMatchObject([
       {
         type: "createJob",
         title: "عنوان",
         prompt: "سوال",
         sources: [{ path: `/tmp/f1`, filename: "f1.pdf" }],
         output: "audio",
+        mode: "create",
+        sessionId: null,
+        chatId: 1,
       },
     ]);
   });
@@ -319,5 +335,148 @@ describe("cookie flow (/cookie)", () => {
     const { fm, file } = setup();
     fm.handleCookieCommand(1);
     expect(fm.handleSource(1, [file(1)])).toEqual([{ type: "send", text: botMessages.cookieFileOnly }]);
+  });
+});
+
+describe("persistent notebook session (IN_SESSION)", () => {
+  /** Drive chat 1 through source→title→prompt, submit, and complete a
+   *  successful create → the flow is now IN_SESSION with sessionId "ns_1". */
+  function enterSession(fm: FlowManager, file: (i: number) => SourceFile): void {
+    fm.handleSource(1, [file(1)]);
+    fm.handleText(1, "عنوان");
+    const acts = fm.handleText(1, "خلاصه کن");
+    const act = acts[0]!;
+    expect(act.type).toBe("createJob");
+    if (act.type === "createJob") {
+      expect(act.mode).toBe("create");
+      expect(act.sessionId).toBeNull();
+      expect(act.chatId).toBe(1);
+    }
+    fm.markSubmitted(1, "j1", "ns_1");
+    fm.jobDone(1, true);
+    expect(fm.peekState(1)).toBe("IN_SESSION");
+    expect(fm.flowFor(1).sessionId).toBe("ns_1");
+  }
+
+  it("a successful create opens the session; a failed create returns to IDLE", () => {
+    const { fm, file } = setup();
+    // Failed first create → IDLE (the orphan session row is harmless).
+    fm.handleSource(1, [file(1)]);
+    fm.handleText(1, "عنوان");
+    fm.handleText(1, "خلاصه کن");
+    fm.markSubmitted(1, "j1", "ns_x");
+    fm.jobDone(1, false);
+    expect(fm.peekState(1)).toBe("IDLE");
+    expect(fm.flowFor(1).sessionId).toBeNull();
+  });
+
+  it("a plain message in IN_SESSION is a follow-up ask on the session", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    const acts = fm.handleText(1, "حالا بیشتر توضیح بده");
+    expect(acts).toHaveLength(1);
+    expect(acts[0]!).toMatchObject({
+      type: "createJob",
+      mode: "ask",
+      sessionId: "ns_1",
+      chatId: null,
+      prompt: "حالا بیشتر توضیح بده",
+      output: "answer",
+    });
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+  });
+
+  it("a file in IN_SESSION is an add_source on the session notebook", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    const acts = fm.handleSource(1, [file(9)]);
+    expect(acts).toHaveLength(1);
+    expect(acts[0]!).toMatchObject({
+      type: "createJob",
+      mode: "add_source",
+      sessionId: "ns_1",
+      chatId: null,
+      output: "answer",
+    });
+    if (acts[0]!.type === "createJob") {
+      expect(acts[0]!.sources.map((s) => s.filename)).toEqual(["f9.pdf"]);
+    }
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+  });
+
+  it("a kind command in IN_SESSION is an artifact on the session notebook", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    const acts = fm.handleKindCommand(1, "infographic");
+    expect(acts).toHaveLength(1);
+    expect(acts[0]!).toMatchObject({
+      type: "createJob",
+      mode: "artifact",
+      sessionId: "ns_1",
+      chatId: null,
+      output: "infographic",
+    });
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+    // The flow remembers the kind so the poller can deliver the artifact.
+    expect(fm.flowFor(1).output).toBe("infographic");
+  });
+
+  it("a follow-up that fails keeps the session open (IN_SESSION)", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    fm.handleText(1, "سوال");
+    fm.markSubmitted(1, "j2");
+    fm.jobDone(1, false); // follow-up failed
+    expect(fm.peekState(1)).toBe("IN_SESSION");
+    expect(fm.flowFor(1).sessionId).toBe("ns_1");
+  });
+
+  it("/finish closes the session and returns to IDLE", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    const acts = fm.handleFinish(1);
+    expect(acts).toEqual([{ type: "finishSession", sessionId: "ns_1" }]);
+    expect(fm.peekState(1)).toBe("IDLE");
+    expect(fm.flowFor(1).sessionId).toBeNull();
+  });
+
+  it("/finish with no active session answers noActiveSession", () => {
+    const { fm } = setup();
+    expect(fm.handleFinish(1)).toEqual([{ type: "send", text: botMessages.noActiveSession }]);
+    expect(fm.peekState(1)).toBe("IDLE");
+  });
+
+  it("/start in IN_SESSION resets to a fresh (WAIT_SOURCE) flow", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    expect(fm.handleStart(1)).toEqual([{ type: "send", text: botMessages.welcome }]);
+    expect(fm.peekState(1)).toBe("WAIT_SOURCE");
+    expect(fm.flowFor(1).sessionId).toBeNull();
+  });
+
+  it("/cancel in IN_SESSION drops the bot's session anchor (cancelIdle)", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    expect(fm.handleCancel(1)).toEqual([{ type: "send", text: botMessages.cancelIdle }]);
+    expect(fm.peekState(1)).toBe("IDLE");
+  });
+
+  it("a message while a session follow-up is in flight is busy", () => {
+    const { fm, file } = setup();
+    enterSession(fm, file);
+    fm.handleText(1, "سوال"); // → SUBMITTED
+    expect(fm.peekState(1)).toBe("SUBMITTED");
+    expect(fm.handleText(1, "دیگر سوال")).toEqual([{ type: "send", text: botMessages.busy }]);
+    fm.jobDone(1, true);
+    expect(fm.peekState(1)).toBe("IN_SESSION");
+  });
+
+  it("resets an idle IN_SESSION flow after the TTL", () => {
+    const { fm, file, advance } = setup();
+    enterSession(fm, file);
+    expect(fm.peekState(1)).toBe("IN_SESSION");
+    advance(HOUR + 1);
+    expect(fm.peekState(1)).toBe("IDLE");
+    expect(fm.flowFor(1).sessionId).toBeNull();
   });
 });

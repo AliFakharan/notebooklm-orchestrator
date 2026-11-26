@@ -144,9 +144,11 @@ export class NloApi {
   }
 
   /**
-   * POST /api/jobs (multipart/form-data): field `prompt` (required), optional
-   * fields `title`, `output`, `language`, and 0..N `file` parts. → 201 {id,
-   * status}. `output`/`language` are appended only when present.
+   * POST /api/jobs (multipart/form-data): field `prompt` (required for
+   * create/ask; optional for add_source/artifact), optional fields `title`,
+   * `output`, `language`, 0..N `file` parts, and — for persistent sessions —
+   * `mode`/`sessionId`/`chatId`. → 201 {id, status, sessionId?, ...}.
+   * `output`/`language`/`mode`/`sessionId`/`chatId` are appended when present.
    */
   async createJob(input: {
     prompt: string;
@@ -154,17 +156,44 @@ export class NloApi {
     files: JobFile[];
     output?: string;
     language?: string;
-  }): Promise<{ id: string; status: string }> {
+    mode?: "create" | "ask" | "add_source" | "artifact";
+    sessionId?: string | null;
+    chatId?: number | null;
+  }): Promise<{
+    id: string;
+    status: string;
+    sessionId: string | null;
+    mode: string | null;
+    notebookTitle: string | null;
+    notebookId: string | null;
+  }> {
     const form = new FormData();
     form.append("prompt", input.prompt);
     if (input.title) form.append("title", input.title);
     if (input.output) form.append("output", input.output);
     if (input.language) form.append("language", input.language);
+    if (input.mode) form.append("mode", input.mode);
+    if (input.sessionId) form.append("sessionId", input.sessionId);
+    if (input.chatId != null) form.append("chatId", String(input.chatId));
     for (const f of input.files) {
       const buf = await readFile(f.path);
       form.append("file", new Blob([buf], { type: f.contentType ?? "application/octet-stream" }), f.filename);
     }
-    return this.request<{ id: string; status: string }>("/api/jobs", { method: "POST", body: form }, this.uploadTimeoutMs);
+    return this.request<{
+      id: string;
+      status: string;
+      sessionId: string | null;
+      mode: string | null;
+      notebookTitle: string | null;
+      notebookId: string | null;
+    }>("/api/jobs", { method: "POST", body: form }, this.uploadTimeoutMs);
+  }
+
+  /** POST /api/notebook-sessions/:id/finish → {ok, status, note?}. */
+  async finishSession(sessionId: string): Promise<{ ok: boolean; status: string; note?: string }> {
+    return this.request(`/api/notebook-sessions/${encodeURIComponent(sessionId)}/finish`, {
+      method: "POST",
+    }, SIMPLE_TIMEOUT_MS);
   }
 
   /** GET /api/jobs/:id → job detail (answerMarkdown holds the output). */

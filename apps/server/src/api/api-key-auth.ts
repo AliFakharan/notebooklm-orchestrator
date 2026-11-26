@@ -35,7 +35,7 @@ export function isTrustedIp(ip: string, trustedIps: string[]): boolean {
 }
 
 /** Surfaces reachable with a Bearer API key (machine-to-machine clients). */
-const KEY_GATED_PREFIXES = ["/api/jobs", "/api/sessions"];
+const KEY_GATED_PREFIXES = ["/api/jobs", "/api/sessions", "/api/notebook-sessions"];
 
 function isKeyGatedSurface(url: string): boolean {
   const path = (url ?? "").split("?")[0] ?? "";

@@ -28,7 +28,12 @@ export type FlowState =
   | "WAIT_TITLE"
   | "WAIT_PROMPT"
   | "SUBMITTED"
-  | "WAIT_COOKIE";
+  | "WAIT_COOKIE"
+  /** A persistent notebook session is active for this chat. */
+  | "IN_SESSION";
+
+/** What a job does relative to its persistent notebook session. */
+export type SessionJobMode = "create" | "ask" | "add_source" | "artifact";
 
 export interface SourceFile {
   /** Temp file on disk (bot-owned; cleaned up by bot.ts). */
@@ -41,9 +46,22 @@ export interface SourceFile {
 
 export type FlowAction =
   | { type: "send"; text: string }
-  | { type: "createJob"; title: string | null; prompt: string; sources: SourceFile[]; output: JobOutputKind }
+  | {
+      type: "createJob";
+      title: string | null;
+      prompt: string;
+      sources: SourceFile[];
+      output: JobOutputKind;
+      /** How this job addresses a persistent notebook session. */
+      mode: SessionJobMode;
+      /** The session id (null = the server opens a new one on `create`). */
+      sessionId: string | null;
+      /** The chat that owns a newly-created session (for `create`). */
+      chatId: number | null;
+    }
   | { type: "cancelJob"; jobId: string }
-  | { type: "importCookies"; text: string };
+  | { type: "importCookies"; text: string }
+  | { type: "finishSession"; sessionId: string };
 
 export interface Flow {
   chatId: number;
@@ -58,6 +76,10 @@ export interface Flow {
   jobDeadline: number | null;
   /** Submit timestamps (for the per-chat 24 h limit). */
   jobStartTimestamps: number[];
+  /** The persistent notebook session this chat is anchored to (null = none). */
+  sessionId: string | null;
+  /** True when the in-flight SUBMITTED job is the session's creating job. */
+  pendingCreate: boolean;
   updatedAt: number;
 }
 
@@ -76,9 +98,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** Persian user-facing templates (no internals, no secrets). */
 export const botMessages = {
   welcome:
-    "سلام! 👋\nمن دستیار NLO هستم.\nفایل یا متنت را بفرست، بعد عنوان و سوال/دستورت را بنویس تا برایت کار کنم.\n\n📖 /help راهنما\n✋ /cancel لغو",
+    "سلام! 👋\nمن دستیار NLO هستم.\n\n۱) فایل یا 📝 متنت را بفرست\n۲) یک عنوان بفرست\n۳) سوال/دستورت را بنویس\n\nجاب ساخته می‌شود؛ بعد می‌توانی روی همین نوت‌بوک ادامه بدهی:\n📝 سوال جدید بپرس، 📎 فایل جدید اضافه کن، یا خروجیِ نوع بگیر (مثل /infographic).\n\n🏁 /finish — پایان جلسه\n📖 /help راهنما\n✋ /cancel لغو",
   help:
-    "راهنما:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم.\n\nخروجی‌های ویژه (بعد از دستور، فایل را بفرست):\n🎧 /audio — پادکست صوتی\n🖼️ /infographic — اینفوگرافیک\n📊 /slides — اسلاید (PDF)\n📄 /report — گزارش\n❓ /quiz — آزمون\n🃏 /flashcards — فلش‌کارت\n🧠 /mindmap — نقشه ذهنی\n📈 /datatable — جدول داده\n\n🍪 /cookie — به‌روزرسانی کوکی گوگل (وقتی لاگین منقضی شد)\n✋ /cancel — لغو جاب جاری",
+    "راهنما:\n📥 شروع:\n۱) فایل یا متن بفرست (PDF, DOCX, PPTX, CSV, TXT, MD, EPUB, عکس, صدا, ویدیو یا متن ساده)\n۲) یک عنوان بفرست\n۳) سوال یا دستور خودت را بنویس\n\nجاب ساخته می‌شود و به‌محض اتمام، جواب را همین‌جا می‌فرستم. یک نوت‌بوک برای این گفتگو «باز» می‌ماند تا روی آن ادامه بدهی:\n📝 متن ساده بفرست → سوالِ دنبال‌شونده روی همان گفتگو\n📎 فایل جدید بفرست → به همان نوت‌بوک اضافه می‌شود\nخروجی‌های ویژه (روی همان نوت‌بوک، prompt اختیاری):\n🎧 /audio — پادکست صوتی\n🖼️ /infographic — اینفوگرافیک\n📊 /slides — اسلاید (PDF)\n📄 /report — گزارش\n❓ /quiz — آزمون\n🃏 /flashcards — فلش‌کارت\n🧠 /mindmap — نقشه ذهنی\n📈 /datatable — جدول داده\n\n🏁 /finish — پایان جلسه (نوت‌بوک در گوگل می‌ماند)\n🍪 /cookie — به‌روزرسانی کوکی گوگل (وقتی لاگین منقضی شد)\n✋ /cancel — لغو جاب جاری",
   hintSource: "📎 حالا فایل یا 📝 متن خودت را بفرست.",
   onlyFileOrText: "فقط فایل یا متن را می‌فهمم. /help برای راهنما.",
   privateOnly: "فقط در گفتگوی خصوصی کار می‌کنم.",
@@ -90,6 +112,8 @@ export const botMessages = {
   promptTextOnly: "لطفاً سوال را به‌صورت متن بفرست.",
   submitted: "✅ جاب ساخته شد؛ به‌محض اتمام خبر می‌دهم. (لغو: /cancel)",
   busy: "جاب قبلی هنوز در حال اجراست؛ کمی صبر کن. (لغو: /cancel)",
+  noActiveSession: "فعلاً جلسه‌ای فعال نیست. برای شروع فایل یا متن بفرست (یا /start).",
+  sessionFinished: "🏁 جلسه بسته شد. نوت‌بوک در گوگل می‌ماند؛ برای شروع دوباره فایل یا متن بفرست.",
   cancelIdle: "فعلاً جابی در جریان نیست.",
   cancelledFlow: "انصراف شد. برای شروع دوباره /start بزن.",
   cancelled: "جاب لغو شد.",
@@ -227,6 +251,8 @@ export class FlowManager {
         jobSubmittedAt: null,
         jobDeadline: null,
         jobStartTimestamps: [],
+        sessionId: null,
+        pendingCreate: false,
         updatedAt: this.now(),
       };
       this.flows.set(chatId, f);
@@ -254,6 +280,8 @@ export class FlowManager {
     f.jobId = null;
     f.jobSubmittedAt = null;
     f.jobDeadline = null;
+    f.sessionId = null;
+    f.pendingCreate = false;
     f.updatedAt = this.now();
   }
 
@@ -293,10 +321,28 @@ export class FlowManager {
   handleKindCommand(chatId: number, output: JobOutputKind): FlowAction[] {
     const f = this.flowFor(chatId);
     if (f.state === "SUBMITTED" && f.jobId) return [{ type: "send", text: botMessages.busy }];
+    // In an active session, a kind command generates the artifact on the SAME
+    // notebook (prompt optional); no fresh source→title→prompt flow.
+    if (f.state === "IN_SESSION") {
+      if (!f.sessionId) return [{ type: "send", text: botMessages.noActiveSession }];
+      return this.toSubmitted(f, this.sessionJobAction(f, "artifact", "", [], output));
+    }
     this.resetToIdle(f);
     f.state = "WAIT_SOURCE";
     f.output = output;
     return [{ type: "send", text: kindWelcome(output) }];
+  }
+
+  /** /finish — close the active session and return to IDLE. */
+  handleFinish(chatId: number): FlowAction[] {
+    const f = this.flowFor(chatId);
+    if (f.state === "SUBMITTED" && f.jobId) return [{ type: "send", text: botMessages.busy }];
+    if (f.state !== "IN_SESSION" || !f.sessionId) {
+      return [{ type: "send", text: botMessages.noActiveSession }];
+    }
+    const sessionId = f.sessionId;
+    this.resetToIdle(f);
+    return [{ type: "finishSession", sessionId }];
   }
 
   /** /help — reference text; does not disturb an in-progress flow. */
@@ -331,6 +377,11 @@ export class FlowManager {
       case "WAIT_COOKIE":
         this.resetToIdle(f);
         return [{ type: "send", text: botMessages.cancelledFlow }];
+      case "IN_SESSION":
+        // No job in flight in IN_SESSION; drop the bot's session anchor (the
+        // server session stays open until /finish or the idle TTL).
+        this.resetToIdle(f);
+        return [{ type: "send", text: botMessages.cancelIdle }];
       case "SUBMITTED": {
         if (!f.jobId) {
           this.resetToIdle(f);
@@ -343,16 +394,32 @@ export class FlowManager {
 
   /** Leave SUBMITTED after the job was cancelled (or is already terminal). */
   jobCancelled(chatId: number): void {
-    const f = this.flowFor(chatId);
-    if (f.state !== "SUBMITTED") return;
-    this.resetToIdle(f);
+    this.leaveSubmitted(this.flowFor(chatId), false);
   }
 
-  /** Leave SUBMITTED after a terminal result (or timeout). */
-  jobDone(chatId: number): void {
-    const f = this.flowFor(chatId);
+  /**
+   * Leave SUBMITTED after a terminal result (or timeout). `success` only
+   * matters for the session-creating job: a successful `create` opens the
+   * chat's session (IN_SESSION); a failed one returns to IDLE (the orphan
+   * session row is reset by the next create or the idle TTL). A follow-up
+   * (ask/add_source/artifact) always returns to IN_SESSION regardless of the
+   * outcome (the session stays open either way).
+   */
+  jobDone(chatId: number, success = true): void {
+    this.leaveSubmitted(this.flowFor(chatId), success);
+  }
+
+  /** Transition out of SUBMITTED, honoring the session anchor. */
+  private leaveSubmitted(f: Flow, success: boolean): void {
     if (f.state !== "SUBMITTED") return;
-    this.resetToIdle(f);
+    if (!f.pendingCreate || success) {
+      f.state = "IN_SESSION";
+      // The creating job is done; future follow-ups are not creates.
+      f.pendingCreate = false;
+      f.updatedAt = this.now();
+    } else {
+      this.resetToIdle(f);
+    }
   }
 
   /** Leave WAIT_COOKIE after the import finished (success or failure). */
@@ -397,6 +464,21 @@ export class FlowManager {
         return [{ type: "send", text: botMessages.cookieFileOnly }];
       case "SUBMITTED":
         return [{ type: "send", text: botMessages.busy }];
+      case "IN_SESSION": {
+        // A file in an active session is APPENDED to the session notebook
+        // (not a fresh job). No accumulation: this message's files only.
+        if (!f.sessionId) return [{ type: "send", text: botMessages.noActiveSession }];
+        f.updatedAt = this.now();
+        const accepted = files.slice(0, MAX_SOURCES_PER_JOB);
+        const actions: FlowAction[] = [];
+        if (files.length > accepted.length) {
+          actions.push({ type: "send", text: botMessages.tooManyFiles });
+        }
+        actions.push(
+          ...this.toSubmitted(f, this.sessionJobAction(f, "add_source", "", accepted, "answer")),
+        );
+        return actions;
+      }
     }
   }
 
@@ -438,6 +520,14 @@ export class FlowManager {
       }
       case "SUBMITTED":
         return [{ type: "send", text: botMessages.busy }];
+      case "IN_SESSION": {
+        // A plain message in an active session is a FOLLOW-UP question on the
+        // session's conversation.
+        if (!f.sessionId) return [{ type: "send", text: botMessages.noActiveSession }];
+        if (!trimmed) return [{ type: "send", text: botMessages.noActiveSession }];
+        f.updatedAt = this.now();
+        return this.toSubmitted(f, this.sessionJobAction(f, "ask", trimmed, [], "answer"));
+      }
     }
   }
 
@@ -452,11 +542,15 @@ export class FlowManager {
 
   // --- job lifecycle hooks (called by bot.ts after API calls) -------------
 
-  /** Record the 201 job id for a SUBMITTED flow. */
-  markSubmitted(chatId: number, jobId: string): void {
+  /**
+   * Record the 201 job id (and, for a `create` job, the generated session id)
+   * for a SUBMITTED flow.
+   */
+  markSubmitted(chatId: number, jobId: string, sessionId?: string | null): void {
     const f = this.flowFor(chatId);
-    if (f.state !== "SUBMITTED" || f.jobId) return;
+    if (f.state !== "SUBMITTED") return;
     f.jobId = jobId;
+    if (sessionId && !f.sessionId) f.sessionId = sessionId;
   }
 
   /** createJob failed (4xx / network): roll back quota and go IDLE. */
@@ -471,7 +565,54 @@ export class FlowManager {
     return [...this.flows.values()].filter((f) => f.state === "SUBMITTED" && f.jobId !== null);
   }
 
+  /**
+   * The first job of a chat always creates a persistent session (mode=create):
+   * the server opens it and returns the sessionId (stored via markSubmitted).
+   */
   private submitJob(f: Flow): FlowAction[] {
+    f.pendingCreate = true;
+    f.sessionId = null;
+    const action: Extract<FlowAction, { type: "createJob" }> = {
+      type: "createJob",
+      title: f.title,
+      prompt: f.prompt ?? "",
+      sources: f.sources,
+      output: f.output,
+      mode: "create",
+      sessionId: null,
+      chatId: f.chatId,
+    };
+    return this.toSubmitted(f, action);
+  }
+
+  /** Build a session follow-up createJob action (ask/add_source/artifact). */
+  private sessionJobAction(
+    f: Flow,
+    mode: Exclude<SessionJobMode, "create">,
+    prompt: string,
+    sources: SourceFile[],
+    output: JobOutputKind,
+  ): Extract<FlowAction, { type: "createJob" }> {
+    return {
+      type: "createJob",
+      title: null,
+      prompt,
+      sources,
+      output,
+      mode,
+      sessionId: f.sessionId,
+      chatId: null,
+    };
+  }
+
+  /**
+   * Enforce the per-chat quota, then move the flow to SUBMITTED with the given
+   * createJob action. Shared by the first job (create) and session follow-ups.
+   */
+  private toSubmitted(
+    f: Flow,
+    action: Extract<FlowAction, { type: "createJob" }>,
+  ): FlowAction[] {
     const now = this.now();
     f.updatedAt = now;
     f.jobStartTimestamps = f.jobStartTimestamps.filter((t) => now - t < DAY_MS);
@@ -485,9 +626,9 @@ export class FlowManager {
     f.jobSubmittedAt = now;
     f.jobDeadline = now + this.jobTimeoutMs;
     f.jobId = null; // set via markSubmitted after the API 201
-    return [
-      { type: "createJob", title: f.title, prompt: f.prompt ?? "", sources: f.sources, output: f.output },
-    ];
+    // The poller reads f.output to decide artifact delivery vs. text answer.
+    f.output = action.output;
+    return [action];
   }
 }
 
