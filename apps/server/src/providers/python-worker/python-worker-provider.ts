@@ -353,9 +353,12 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     }
     // Verification talks to the REAL service: route through a verified tunnel
     // (fail-closed when nodes exist). The tunnel is kept alive while used.
+    // With NLO_ALLOW_DIRECT_EGRESS=1 the verify goes direct and configured
+    // proxy nodes are ignored (the failover loop below serves proxy-carrying
+    // deployments only).
     const pm = this.opts.proxyManager;
     const enabled = this.opts.proxiesRepo?.listEnabled() ?? [];
-    if (!pm || enabled.length === 0) {
+    if (this.opts.allowDirect || !pm || enabled.length === 0) {
       const tunnel = await this.acquireAuthTunnel();
       try {
         const r = await this.runWorkerVerify(sessionPath, tunnel.handle);
