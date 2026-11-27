@@ -212,6 +212,53 @@ describe("mode=add_source appends to the session notebook", () => {
   });
 });
 
+describe("mode=artifact generates output on the session notebook", () => {
+  it("succeeds with ZERO job sources (the notebook's sources are used) and an empty prompt", async () => {
+    const { parts, sessions, runner } = setup();
+    const session = sessions.create({ chatId: 107, notebookTitle: "t" });
+    const first = newSessionJob(parts, {
+      sessionId: session.id,
+      mode: "create",
+      prompt: "open",
+      sources: [{ name: "a.txt", content: "x", mediaType: "text/plain" }],
+    });
+    await runner.run(first.id);
+    const afterCreate = sessions.get(session.id)!;
+
+    const { calls } = captureRunJob(parts);
+    // Bot /infographic in-session: mode=artifact, output=infographic, no
+    // sources, no prompt — must pass validation (previously failed with
+    // `output "infographic" requires at least one source file`).
+    const artJob = newSessionJob(parts, {
+      sessionId: session.id,
+      mode: "artifact",
+      prompt: "",
+      output: "infographic",
+    });
+    const result = await runner.run(artJob.id);
+
+    expect(result.status).toBe("SUCCEEDED");
+    const call = calls[0]!;
+    expect(call.mode).toBe("artifact");
+    expect(call.notebookId).toBe(afterCreate.notebookId);
+    expect(call.sources).toHaveLength(0);
+    const after = sessions.get(session.id)!;
+    expect(after.notebookId).toBe(afterCreate.notebookId); // unchanged
+  });
+
+  it("a NON-session job with a non-answer output and zero sources still fails closed", async () => {
+    const { parts, sessions, runner } = setup();
+    sessions.create({ chatId: 108, notebookTitle: "t" });
+    const job = newSessionJob(parts, { output: "infographic" }); // no mode/session/sources
+
+    const result = await runner.run(job.id);
+
+    expect(result.status).toBe("FAILED");
+    expect(result.errorClass).toBe("invalid_input");
+    expect(result.errorMessage).toMatch(/requires at least one source file/);
+  });
+});
+
 describe("fail-closed when the session cannot serve the job", () => {
   it("a closed session fails the job (invalid_input) without a provider call", async () => {
     const { parts, sessions, runner, acct } = setup();

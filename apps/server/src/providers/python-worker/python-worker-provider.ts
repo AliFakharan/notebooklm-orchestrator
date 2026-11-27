@@ -87,8 +87,9 @@ export class PythonWorkerProvider implements NotebookLMProvider {
       /** Per-job hard timeout (default 30 min). */
       jobTimeoutMs?: number;
       /**
-       * True to allow auth ops (login/verify) WITHOUT a tunnel when NO proxy
-       * node is configured at all. Jobs are ALWAYS fail-closed regardless.
+       * True to force auth ops (login/verify) WITHOUT a tunnel (direct egress,
+       * configured proxy nodes ignored). Jobs are ALWAYS fail-closed
+       * regardless (their egress choice is the runner's).
        */
       allowDirect?: boolean;
       /** Selects/starts a tunnel for auth ops (login/verify) — fail-closed.
@@ -103,7 +104,7 @@ export class PythonWorkerProvider implements NotebookLMProvider {
         markNblDestinationFailure?: (nodeId: string, detail: string) => Promise<void>;
         markNblDestinationSuccess?: (nodeId: string) => Promise<void>;
       };
-      /** Configured nodes (direct auth only when none exist). */
+      /** Configured nodes (auth egress is fail-closed through them). */
       proxiesRepo?: {
         countEnabled: () => number;
         listEnabled: () => { id: string }[];
@@ -182,20 +183,22 @@ export class PythonWorkerProvider implements NotebookLMProvider {
     const pm = this.opts.proxyManager;
     const repo = this.opts.proxiesRepo;
     const enabled = repo?.listEnabled() ?? [];
-    if (!pm || enabled.length === 0) {
-      if (!this.opts.allowDirect) {
-        throw new ProviderFailure({
-          failureClass: "proxy",
-          message:
-            "no proxy route available for auth (fail-closed): configure a proxy node or set NLO_ALLOW_DIRECT_EGRESS=1",
-          ambiguous: false,
-          needsReauth: false,
-        });
-      }
+    if (this.opts.allowDirect) {
+      // Explicit, logged configuration choice (NLO_ALLOW_DIRECT_EGRESS=1):
+      // auth ops go direct and configured proxy nodes are ignored.
       this.log(
-        "auth op proceeding with DIRECT egress (no proxy node configured; NLO_ALLOW_DIRECT_EGRESS=1)",
+        "auth op proceeding with DIRECT egress (NLO_ALLOW_DIRECT_EGRESS=1; proxy nodes ignored)",
       );
       return { nodeId: "", handle: null };
+    }
+    if (!pm || enabled.length === 0) {
+      throw new ProviderFailure({
+        failureClass: "proxy",
+        message:
+          "no proxy route available for auth (fail-closed): configure a proxy node or set NLO_ALLOW_DIRECT_EGRESS=1",
+        ambiguous: false,
+        needsReauth: false,
+      });
     }
     // selectAuto self-heals stale health (10-min TTL passed) by running the
     // real staged check against the NotebookLM target before failing — the

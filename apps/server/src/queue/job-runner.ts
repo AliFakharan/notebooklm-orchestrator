@@ -62,9 +62,10 @@ export interface JobRunnerDeps {
   sleep?: (ms: number) => Promise<void>;
   rng?: () => number;
   /**
-   * When true AND zero enabled proxy nodes exist, the job proceeds with a
-   * null tunnel (direct egress) instead of failing closed. Mirrors the
-   * python-worker provider's acquireAuthTunnel() semantics (NLO_ALLOW_DIRECT_EGRESS=1).
+   * When true, the job ALWAYS proceeds with a null tunnel (direct egress) and
+   * configured proxy nodes are ignored (NLO_ALLOW_DIRECT_EGRESS=1). When
+   * false (default), proxy selection is fail-closed. Mirrors the
+   * python-worker provider's acquireAuthTunnel() semantics.
    */
   allowDirect?: boolean;
 }
@@ -175,19 +176,14 @@ export class JobRunner {
         this.d.jobs.setStatus(jobId, "WAITING_FOR_PROXY");
         let handle: TunnelHandle | null = null;
         let nodeId: string | null = null;
-        if (
-          this.d.allowDirect &&
-          this.d.proxies.list().filter((n) => n.enabled).length === 0
-        ) {
-          // Zero enabled proxy nodes: an explicit, logged configuration
-          // choice (NLO_ALLOW_DIRECT_EGRESS=1) to proceed direct. If ANY
-          // enabled node exists, the fail-closed selectAuto() path below
-          // still applies (unhealthy nodes never fall back to direct).
+        if (this.d.allowDirect) {
+          // Explicit, logged configuration choice (NLO_ALLOW_DIRECT_EGRESS=1):
+          // ALL egress is direct and configured proxy nodes are ignored.
           this.logEvent(
             jobId,
             archive,
             "direct_egress",
-            "no proxy node configured; proceeding direct (NLO_ALLOW_DIRECT_EGRESS=1)",
+            "proceeding direct (NLO_ALLOW_DIRECT_EGRESS=1; proxy nodes ignored)",
           );
         } else {
           try {
@@ -351,8 +347,15 @@ export class JobRunner {
     }
     // Non-answer outputs are NotebookLM artifacts generated from the
     // notebook's sources, so they require at least one source (fail-closed).
+    // Exception: an in-session `artifact` job (mode=artifact) generates the
+    // output from the session notebook's EXISTING sources — the job itself
+    // carries no sources (the anchor above already proved the notebook exists).
     const output = job.input.output ?? "answer";
-    if (output !== "answer" && job.input.sources.length === 0) {
+    if (
+      output !== "answer" &&
+      job.input.mode !== "artifact" &&
+      job.input.sources.length === 0
+    ) {
       this.d.jobs.setStatus(jobId, "FAILED", {
         errorClass: "invalid_input",
         errorMessage: `output "${output}" requires at least one source file`,

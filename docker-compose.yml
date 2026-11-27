@@ -39,8 +39,9 @@ services:
       NLO_PORT: "4870"
       NLO_PROVIDER: ${NLO_PROVIDER:-mock}
       NLO_PROXY_RUNTIME: ${NLO_PROXY_RUNTIME:-mock}
-      # Direct egress for proxy-less deployments (auth ops + jobs run without
-      # a tunnel). Set to 1 in .env only when you intend NO proxy nodes.
+      # Direct egress: 1 = jobs + auth ops run WITHOUT a tunnel and configured
+      # proxy nodes are ignored (for hosts that reach NotebookLM directly).
+      # 0 = proxy required (fail-closed).
       NLO_ALLOW_DIRECT_EGRESS: ${NLO_ALLOW_DIRECT_EGRESS:-0}
       # Pin to the venv baked into the image (/opt/nbl-venv). Do NOT interpolate
       # NLO_PYTHON_BIN here: in bare mode your .env points at a HOST path

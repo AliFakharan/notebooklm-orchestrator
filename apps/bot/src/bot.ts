@@ -428,10 +428,30 @@ async function main(): Promise<void> {
     if (anyFailed && files.length > 0) send(chatId, botMessages.downloadFailed);
   };
 
+  // --- redelivery guard --------------------------------------------------------
+  // Bale can deliver the same message more than once (long-poll retries,
+  // reconnects). Dispatching it twice would send a double reply (e.g. two
+  // /start welcomes). Each (chat, message) pair is dispatched at most once
+  // per process life; the bound keeps the set tiny (500 recent messages).
+  const seenMessages = new Set<string>();
+  const seenOrder: string[] = [];
+  const alreadySeen = (chatId: number, messageId: number): boolean => {
+    const key = `${chatId}:${messageId}`;
+    if (seenMessages.has(key)) return true;
+    seenMessages.add(key);
+    seenOrder.push(key);
+    if (seenOrder.length > 500) {
+      const old = seenOrder.shift();
+      if (old) seenMessages.delete(old);
+    }
+    return false;
+  };
+
   const dispatch = async (u: BaleUpdate): Promise<void> => {
     const m = u.message;
     if (!m || !m.chat) return;
     const chatId = m.chat.id;
+    if (m.message_id !== undefined && alreadySeen(chatId, m.message_id)) return;
     try {
       if (m.chat.type !== "private") {
         // Groups: reply once, then stay quiet (v1 is private-only).
